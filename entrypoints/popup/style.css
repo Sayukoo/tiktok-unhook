@@ -20,7 +20,85 @@
   background: rgba(138, 139, 145, 0.5);
 }
 
+/* Motyw okna popupu: klasa .dark jest ustawiana przez render() */
+html {
+  background-color: #ffffff;
+}
+
+html.dark {
+  background-color: #141416;
+}
+
 body {
   margin: 0;
   padding: 0;
+  overflow-x: hidden;
+  background-color: inherit;
+}
+
+/* Floating custom tooltip */
+#unhook-floating-tooltip {
+  position: fixed;
+  pointer-events: none;
+  z-index: 999999;
+  background: rgba(18, 18, 24, 0.96);
+  backdrop-filter: blur(12px);
+  color: #f3f4f6;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 11px;
+  line-height: 1.4;
+  font-weight: 400;
+  max-width: 260px;
+  word-wrap: break-word;
+  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.6), 0 8px 10px -6px rgba(0, 0, 0, 0.5);
+  opacity: 0;
+  transform: translateY(4px) scale(0.98);
+  transition: opacity 0.12s cubic-bezier(0.16, 1, 0.3, 1), transform 0.12s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+#unhook-floating-tooltip.visible {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+}
+
+#unhook-floating-tooltip .tooltip-title {
+  font-weight: 600;
+  color: #ffffff;
+  margin-bottom: 2px;
+  display: block;
+}
+
+#unhook-floating-tooltip .tooltip-desc {
+  color: #d1d5db;
+}
+
+#unhook-floating-tooltip .tooltip-hint {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  color: #93c5fd;
+  font-size: 10px;
+}
+
+/* Delikatne wejscie tresci rozwijanej sekcji */
+@keyframes unhookReveal {
+  from { opacity: 0; transform: translateY(-3px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.unhook-reveal {
+  animation: unhookReveal 0.16s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* Szanuj systemowe ograniczenie animacji */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
 }

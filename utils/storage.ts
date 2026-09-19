@@ -15,6 +15,7 @@ export interface TikTokUnhookSettings {
   // 2. Sidebar & Accounts
   hideSuggestedAccounts: boolean;
   highlightFollowingAccounts: boolean;
+  hideFriends: boolean;
   hideLiveSidebar: boolean;
   hidePlaylists: boolean;
   hideFundraisers: boolean;
@@ -34,6 +35,7 @@ export interface TikTokUnhookSettings {
   hideShop: boolean;
   hideAds: boolean;
   hideHeaderPromos: boolean;
+  hideGetCoinsApp: boolean;
 
   // 6. LIVE Streams
   hideLiveChat: boolean;
@@ -44,11 +46,17 @@ export interface TikTokUnhookSettings {
   viralMinLikes: number;
   viralMinComments: number;
 
-  // 8. Compact Following Grid in Sidebar
-  showAllFollowingInSidebar: boolean;
+  // 8. Sidebar "Following accounts" list (collapsed behind a "View all" toggle)
+  hideFollowingSidebarList: boolean;
 
   // 9. Followers
   hideFollowers: boolean;
+
+  // 10. Search focus mode
+  searchUnlockChallenge: boolean;
+
+  // 11. Background playback
+  keepPlayingInBackground: boolean;
 }
 
 export const DEFAULT_SETTINGS: TikTokUnhookSettings = {
@@ -63,6 +71,7 @@ export const DEFAULT_SETTINGS: TikTokUnhookSettings = {
 
   hideSuggestedAccounts: true,
   highlightFollowingAccounts: true,
+  hideFriends: true,
   hideLiveSidebar: true,
   hidePlaylists: true,
   hideFundraisers: true,
@@ -79,6 +88,7 @@ export const DEFAULT_SETTINGS: TikTokUnhookSettings = {
   hideShop: true,
   hideAds: true,
   hideHeaderPromos: true,
+  hideGetCoinsApp: true,
 
   hideLiveChat: true,
   hideLiveGifts: true,
@@ -87,15 +97,21 @@ export const DEFAULT_SETTINGS: TikTokUnhookSettings = {
   viralMinLikes: 1000,
   viralMinComments: 20,
 
-  showAllFollowingInSidebar: true,
+  hideFollowingSidebarList: true,
 
   hideFollowers: true,
+
+  searchUnlockChallenge: true,
+
+  keepPlayingInBackground: true,
 };
 
 const STORAGE_KEY = 'tiktok_unhook_settings';
 const DAILY_STATS_KEY = 'unhook_daily_stats_v1';
 const LAST_SESSION_KEY = 'unhook_last_session_v1';
-const FOLLOWING_CACHE_KEY = 'unhook_following_cache_v1';
+
+/** Keys written by older versions that are no longer read by anything. */
+const LEGACY_LOCAL_KEYS = ['unhook_following_cache_v1'];
 
 export interface DailyStats {
   date: string;
@@ -107,17 +123,6 @@ export interface SessionSummary {
   endedAt: number;
   minutes: number;
   videos: number;
-}
-
-export interface FollowingAccount {
-  href: string;
-  name: string;
-  avatar: string | null;
-}
-
-export interface FollowingCache {
-  fetchedAt: number;
-  accounts: FollowingAccount[];
 }
 
 type AnyApi = any;
@@ -155,16 +160,38 @@ async function writeArea(area: 'sync' | 'local', values: Record<string, unknown>
   }
 }
 
-export async function getSettings(): Promise<TikTokUnhookSettings> {
-  const merged: TikTokUnhookSettings = { ...DEFAULT_SETTINGS };
+/**
+ * Keeps only keys that still exist in DEFAULT_SETTINGS and whose type matches,
+ * so settings removed in a newer version (or corrupt values) can never come back.
+ */
+export function sanitizeSettings(raw: unknown): TikTokUnhookSettings {
+  const out: TikTokUnhookSettings = { ...DEFAULT_SETTINGS };
+  if (!raw || typeof raw !== 'object') return out;
 
+  for (const key of Object.keys(DEFAULT_SETTINGS) as (keyof TikTokUnhookSettings)[]) {
+    const value = (raw as Record<string, unknown>)[key];
+    if (value === undefined || value === null) continue;
+    if (typeof value !== typeof DEFAULT_SETTINGS[key]) continue;
+    if (typeof value === 'number' && !Number.isFinite(value)) continue;
+    (out as unknown as Record<string, unknown>)[key] = value;
+  }
+
+  if (out.theme !== 'dark' && out.theme !== 'light') out.theme = DEFAULT_SETTINGS.theme;
+  if (out.language !== 'en' && out.language !== 'pl') out.language = DEFAULT_SETTINGS.language;
+  out.viralMinLikes = Math.max(0, Math.round(out.viralMinLikes));
+  out.viralMinComments = Math.max(0, Math.round(out.viralMinComments));
+
+  return out;
+}
+
+export async function getSettings(): Promise<TikTokUnhookSettings> {
   const [syncRes, localRes] = await Promise.all([
     readArea('sync', [STORAGE_KEY]),
     readArea('local', [STORAGE_KEY]),
   ]);
 
-  if (localRes?.[STORAGE_KEY]) Object.assign(merged, localRes[STORAGE_KEY]);
-  if (syncRes?.[STORAGE_KEY]) Object.assign(merged, syncRes[STORAGE_KEY]);
+  const stored = { ...(localRes?.[STORAGE_KEY] || {}), ...(syncRes?.[STORAGE_KEY] || {}) };
+  const merged = sanitizeSettings(stored);
 
   if (!getSettings.syncMigrated && localRes?.[STORAGE_KEY] && !syncRes?.[STORAGE_KEY]) {
     getSettings.syncMigrated = true;
@@ -176,7 +203,7 @@ export async function getSettings(): Promise<TikTokUnhookSettings> {
 getSettings.syncMigrated = false;
 
 export async function saveSettings(settings: TikTokUnhookSettings): Promise<void> {
-  const payload = { [STORAGE_KEY]: settings };
+  const payload = { [STORAGE_KEY]: sanitizeSettings(settings) };
   const okSync = await writeArea('sync', payload);
   if (!okSync) await writeArea('local', payload);
   else await writeArea('local', payload);
@@ -188,8 +215,7 @@ export function onSettingsChange(callback: (newSettings: TikTokUnhookSettings) =
     areaName: string
   ) => {
     if ((areaName === 'sync' || areaName === 'local') && changes[STORAGE_KEY]) {
-      const newSettings = { ...DEFAULT_SETTINGS, ...changes[STORAGE_KEY].newValue };
-      callback(newSettings);
+      callback(sanitizeSettings(changes[STORAGE_KEY].newValue));
     }
   };
 
@@ -225,12 +251,13 @@ export async function saveLastSession(summary: SessionSummary): Promise<void> {
   await writeArea('local', { [LAST_SESSION_KEY]: summary });
 }
 
-export async function getFollowingCache(): Promise<FollowingCache | null> {
-  const res = await readArea('local', [FOLLOWING_CACHE_KEY]);
-  const c = res?.[FOLLOWING_CACHE_KEY] as FollowingCache | undefined;
-  return c && Array.isArray(c.accounts) ? c : null;
-}
-
-export async function saveFollowingCache(cache: FollowingCache): Promise<void> {
-  await writeArea('local', { [FOLLOWING_CACHE_KEY]: cache });
+export async function clearLegacyStorage(): Promise<void> {
+  const api = getApi();
+  const store = api?.storage?.local;
+  if (!store?.remove) return;
+  try {
+    await store.remove(LEGACY_LOCAL_KEYS);
+  } catch {
+    /* noop */
+  }
 }

@@ -5,7 +5,7 @@ export default defineConfig({
   manifest: {
     name: 'TikTok Unhook - Distraction-Free Focus Mode',
     description: 'Remove addictive feeds, explore tab, comments, and vanity metrics from TikTok to regain focus and browse intentionally.',
-    version: '1.2.0',
+    version: '1.3.5',
     permissions: ['storage'],
     host_permissions: ['*://*.tiktok.com/*'],
     browser_specific_settings: {
