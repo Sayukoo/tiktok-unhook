@@ -1,5 +1,12 @@
 # 🛡️ TikTok Unhook - Distraction-Free Focus Mode
 
+[![Firefox Add-on](https://img.shields.io/amo/v/tiktok-unhook-distraction-free?label=Firefox%20Add-on&logo=firefox-browser&color=orange)](https://addons.mozilla.org/en-US/firefox/addon/tiktok-unhook-distraction-free/)
+[![Users](https://img.shields.io/amo/users/tiktok-unhook-distraction-free?color=blue)](https://addons.mozilla.org/en-US/firefox/addon/tiktok-unhook-distraction-free/)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](#)
+
+> 🦊 **Install for Firefox (Desktop & Android):**  
+> 👉 **[Download from Mozilla Add-ons (AMO)](https://addons.mozilla.org/en-US/firefox/addon/tiktok-unhook-distraction-free/)**
+
 A modern browser extension for **Firefox** & **Chrome** built with **WXT (React + TypeScript + Tailwind CSS)**. It removes addictive algorithmic feeds, vanity metrics, comments, and distractions from TikTok, allowing you to regain control over your attention and browse intentionally.
 
 Available in **English (Default)** and **Polish**.
