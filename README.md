@@ -7,6 +7,8 @@
 > 🦊 **Install for Firefox (Desktop & Android):**  
 > 👉 **[Download from Mozilla Add-ons (AMO)](https://addons.mozilla.org/en-US/firefox/addon/tiktok-unhook-distraction-free/)**
 
+> 📄 **[Privacy Policy](PRIVACY_POLICY.md)**
+
 A modern browser extension for **Firefox** & **Chrome** built with **WXT (React + TypeScript + Tailwind CSS)**. It removes addictive algorithmic feeds, vanity metrics, comments, and distractions from TikTok, allowing you to regain control over your attention and browse intentionally.
 
 Available in **English (Default)** and **Polish**.
@@ -36,18 +38,39 @@ Available in **English (Default)** and **Polish**.
 
 ## 🚀 Development & Build
 
-### 1. Dev Mode (Firefox):
-```bash
-npm run dev:firefox
-```
+### Google Chrome (Manifest V3)
+* **Dev Mode (hot-reload):**
+  ```bash
+  npm run dev
+  ```
+  *(or double-click `URUCHOM_DEV_CHROME.bat`)*
+* **Build (unpacked extension):**
+  ```bash
+  npm run build
+  ```
+  Output folder: `.output/chrome-mv3` (load into `chrome://extensions`).
+* **Package ZIP for Chrome Web Store:**
+  ```bash
+  npm run zip
+  ```
+  *(or double-click `URUCHOM_WTYCZKE_CHROME.bat`)*
+  Generates ready-to-upload archive in `.output/tiktokunhook-*-chrome.zip`.
 
-### 2. Build for Firefox:
-```bash
-npm run build:firefox
-```
+---
 
-### 3. Package ZIP for addons.mozilla.org (AMO):
-```bash
-npm run zip:firefox
-```
-The output zip archive will be generated in `.output/`.
+### Mozilla Firefox (Manifest V2)
+* **Dev Mode:**
+  ```bash
+  npm run dev:firefox
+  ```
+  *(or double-click `URUCHOM_DEV_FIREFOX.bat`)*
+* **Build:**
+  ```bash
+  npm run build:firefox
+  ```
+  *(or double-click `URUCHOM_WTYCZKE_FIREFOX.bat`)*
+* **Package ZIP for addons.mozilla.org (AMO):**
+  ```bash
+  npm run zip:firefox
+  ```
+  Output archive in `.output/`.
