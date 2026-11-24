@@ -2,38 +2,51 @@ import { defineContentScript } from 'wxt/sandbox';
 import {
   getSettings,
   onSettingsChange,
-  saveDailyStats,
-  getDailyStats,
+  addToDailyStats,
+  onDailyStatsChange,
+  getGuardState,
+  updateGuardState,
+  onGuardChange,
   getLastSession,
   saveLastSession,
-  clearLegacyStorage,
   todayKey,
+  GuardState,
   TikTokUnhookSettings,
 } from '@/utils/storage';
-import { generateStyles, WRAPPED_HIDE_RULES, WRAPPER_HIDE_ATTR } from '@/utils/selectors';
-import { getT } from '@/utils/i18n';
+import {
+  generateStyles,
+  WRAPPED_HIDE_RULES,
+  WRAPPER_HIDE_ATTR,
+  AD_BLOCK_ATTR,
+  RECOMMEND_TAB_ATTR,
+  TEXT_HIDE_ATTRS,
+} from '@/utils/selectors';
+import { getT, TranslationStrings } from '@/utils/i18n';
+import { BRAND } from '@/utils/brand';
+import { KEEP_PLAYING_CACHE_KEY } from '@/utils/keep-playing';
+import { PASS_MS, BlockVerdict, evaluateBlock, formatClock, passCodeLength } from '@/utils/guard';
+import {
+  OWN_UI_ATTR,
+  UI,
+  BlockScreen,
+  closeCodeChallenge,
+  mountBlockScreen,
+  openCodeChallenge,
+  removePageToast,
+  renderPill,
+  showPageToast,
+} from '@/utils/page-ui';
 
 export default defineContentScript({
   matches: ['*://*.tiktok.com/*'],
   runAt: 'document_start',
   main() {
-    console.log('[TikTok Unhook] Content script initialized.');
+    const LOG = BRAND.logPrefix;
+    console.log(LOG, 'Content script initialized.');
 
-    // --- Background playback: stop TikTok's own JS from pausing video on tab switch/minimize ---
-    // TikTok voluntarily pauses via the Page Visibility API (document.hidden/visibilitychange),
-    // not because browsers force it. We spoof that API for the PAGE's own scripts by injecting
-    // a <script> tag (isolated content-script world can't override it for the page itself).
-    // Settings load async, but this must run at document_start before TikTok's bundle attaches
-    // its listeners - so we read a synchronous localStorage cache written on every settings save.
-    const KEEP_PLAYING_CACHE_KEY = 'unhook_keep_playing_v1';
-    const readKeepPlayingCache = (): boolean => {
-      try {
-        const v = localStorage.getItem(KEEP_PLAYING_CACHE_KEY);
-        return v === null ? true : v === '1'; // default true = matches DEFAULT_SETTINGS
-      } catch {
-        return true;
-      }
-    };
+    // "Graj dalej w tle" dziala w swiecie strony (keep-playing.content.ts), ktory
+    // nie ma dostepu do storage rozszerzenia. Ustawienie przekazujemy mu przez
+    // localStorage strony, zapisywany przy kazdej zmianie ustawien.
     const writeKeepPlayingCache = (enabled: boolean) => {
       try {
         localStorage.setItem(KEEP_PLAYING_CACHE_KEY, enabled ? '1' : '0');
@@ -42,38 +55,12 @@ export default defineContentScript({
       }
     };
 
-    if (readKeepPlayingCache()) {
-      try {
-        const script = document.createElement('script');
-        script.textContent = `(${String(function () {
-          try {
-            Object.defineProperty(Document.prototype, 'hidden', { get: () => false, configurable: true });
-            Object.defineProperty(Document.prototype, 'visibilityState', {
-              get: () => 'visible',
-              configurable: true,
-            });
-            document.hasFocus = () => true;
-
-            const block = (e: Event) => e.stopImmediatePropagation();
-            document.addEventListener('visibilitychange', block, true);
-            document.addEventListener('webkitvisibilitychange', block, true);
-            window.addEventListener('blur', block, true);
-          } catch (err) {
-            console.error('[TikTok Unhook] Background playback override failed:', err);
-          }
-        })})();`;
-        (document.head || document.documentElement).appendChild(script);
-        script.remove();
-      } catch (err) {
-        console.error('[TikTok Unhook] Could not inject background playback override:', err);
-      }
-    }
-
-    const STYLE_ID = 'tiktok-unhook-injected-css';
+    const STYLE_ID = 'unhook-injected-css';
     const REDIRECT_GUARD_KEY = 'unhook_redirect_guard_v1';
     const SUMMARY_SEEN_KEY = 'unhook_summary_seen_v1';
     const HIDDEN_MARK = 'data-unhook-hidden';
     const VIRAL_CHECKED_MARK = 'data-unhook-viral-checked';
+    const SESSION_BANNER_ID = 'unhook-session-banner';
 
     let currentSettings: TikTokUnhookSettings | null = null;
 
@@ -84,20 +71,37 @@ export default defineContentScript({
       });
 
     // --- Ochrona przed petla redirectow (przezywa pelne reloady przez sessionStorage) ---
-    type GuardState = { count: number; ts: number };
+    type RedirectGuard = { count: number; ts: number };
 
-    const canRedirect = (): boolean => {
+    const readGuard = (): RedirectGuard => {
+      const now = Date.now();
       try {
-        const now = Date.now();
         const raw = sessionStorage.getItem(REDIRECT_GUARD_KEY);
-        let state: GuardState = raw ? JSON.parse(raw) : { count: 0, ts: now };
-        if (now - state.ts > 30000) state = { count: 0, ts: now };
-        state.count += 1;
-        state.ts = now;
-        sessionStorage.setItem(REDIRECT_GUARD_KEY, JSON.stringify(state));
-        return state.count <= 3;
+        const state: RedirectGuard = raw ? JSON.parse(raw) : { count: 0, ts: now };
+        if (!state || typeof state.count !== 'number') return { count: 0, ts: now };
+        if (now - state.ts > 30000) return { count: 0, ts: now };
+        return state;
       } catch {
-        return true;
+        return { count: 0, ts: now };
+      }
+    };
+
+    /**
+     * Sprawdza budzet przekierowan. NIE liczy samo - wazne, bo applyCSS odpala
+     * handleAutoRedirect przy kazdej zmianie ustawien i kazdej zmianie trasy,
+     * wiec liczenie w miejscu pytania wyczerpywalo budzet bez przekierowania.
+     */
+    const canRedirect = (): boolean => readGuard().count < 3;
+
+    /** Rejestruje faktycznie wykonane przekierowanie. Wolane RAZ, tuz przed nim. */
+    const consumeRedirect = () => {
+      try {
+        const state = readGuard();
+        state.count += 1;
+        state.ts = Date.now();
+        sessionStorage.setItem(REDIRECT_GUARD_KEY, JSON.stringify(state));
+      } catch {
+        /* noop */
       }
     };
 
@@ -109,10 +113,22 @@ export default defineContentScript({
       }
     };
 
+    /**
+     * `unhook-home-feed` wygasza feed na czas skoku na profil. Jesli przekierowanie
+     * nie wyszlo (limit petli, wylogowany uzytkownik, brak linku po 20s), klasa
+     * musi zejsc - inaczej strona glowna zostaje czarna do przeladowania.
+     */
+    const showFeedIfStuck = () => {
+      document.documentElement.classList.remove('unhook-home-feed');
+    };
+
     const redirectToFollowing = () => {
-      console.log('[TikTok Unhook] Redirecting to /following...');
+      console.log(LOG, 'Redirecting to /following...');
       window.location.replace('/following');
     };
+
+    // Ścieżki, z których wtyczka przekierowuje na profil / Obserwowanych.
+    const HOME_PATHS = ['/', '/foryou'];
 
     // Profil wyglada jak "/@username". Pusty placeholder "/@" oznacza brak zalogowania.
     const getProfileHref = (): string | null => {
@@ -123,73 +139,102 @@ export default defineContentScript({
 
     // Budzet przekierowan jest sprawdzany przez wywolujacego (handleAutoRedirect),
     // wiec ta funkcja go juz NIE konsumuje po raz drugi.
+    let profilePollId: number | null = null;
+
     const redirectToProfile = () => {
       const href = getProfileHref();
       if (href) {
-        console.log(`[TikTok Unhook] Redirecting to profile ${href}...`);
+        console.log(LOG, `Redirecting to profile ${href}...`);
         window.location.replace(href);
         return;
       }
 
+      // applyCSS jest wolane wielokrotnie (obserwator, zmiana ustawien), wiec
+      // bez tego zabezpieczenia startowalo kilka odpytywaczy profilu naraz.
+      if (profilePollId !== null) return;
+
       let attempts = 0;
       const MAX_ATTEMPTS = 40; // ~20s co 500ms
 
-      let intervalId = window.setInterval(() => {
-        if (window.location.pathname !== '/') {
-          window.clearInterval(intervalId);
-          intervalId = 0;
+      const stopPolling = () => {
+        if (profilePollId === null) return;
+        window.clearInterval(profilePollId);
+        profilePollId = null;
+      };
+
+      profilePollId = window.setInterval(() => {
+        // Musi byc "wyszedlismy ze strony glownej", a nie "to nie jest /".
+        // Przy samym `pathname !== '/'` odpytywacz natychmiast gasl sie na
+        // /foryou (ktore tez jest w HOME_PATHS) i zostawial wygaszony feed.
+        if (!HOME_PATHS.includes(window.location.pathname)) {
+          stopPolling();
           return;
         }
 
         attempts++;
         const foundHref = getProfileHref();
         if (foundHref) {
-          window.clearInterval(intervalId);
-          intervalId = 0;
-          console.log(`[TikTok Unhook] Redirecting to profile ${foundHref}...`);
+          stopPolling();
+          console.log(LOG, `Redirecting to profile ${foundHref}...`);
           window.location.replace(foundHref);
           return;
         }
 
         if (attempts >= MAX_ATTEMPTS) {
-          window.clearInterval(intervalId);
-          intervalId = 0;
+          stopPolling();
+          showFeedIfStuck();
           console.warn(
-            '[TikTok Unhook] Profile link (data-e2e="nav-profile") not found after 20s. Staying on current page.'
+            LOG, 'Profile link (data-e2e="nav-profile") not found after 20s. Staying on current page.'
           );
         }
       }, 500);
     };
 
     // 1. Auto-redirect z "For You" i "Explore"
-    const HOME_PATHS = ['/', '/foryou'];
-
     const handleAutoRedirect = (settings: TikTokUnhookSettings) => {
       if (!settings.masterEnabled) return;
 
       const path = window.location.pathname;
       const isHome = HOME_PATHS.includes(path);
       const isExplore = path === '/explore' || path.startsWith('/explore/');
+      // Strony zbiorcze LIVE i sklepu. Pojedyncza transmisja obserwowanej osoby
+      // ma adres /@nazwa/live i zostaje dostepna.
+      const isLiveHub = path === '/live' || path.startsWith('/live/');
+      const isShopHub = path === '/shop' || path.startsWith('/shop/');
 
-      if (!isHome && !isExplore) {
+      if (!isHome && !isExplore && !isLiveHub && !isShopHub) {
         clearRedirectGuard();
+        return;
+      }
+
+      if ((isLiveHub && settings.hideLiveSidebar) || (isShopHub && settings.hideShop)) {
+        if (!canRedirect()) {
+          console.warn(LOG, 'Redirect loop detected - aborting redirect.');
+          return;
+        }
+        consumeRedirect();
+        redirectToFollowing();
         return;
       }
 
       if (isHome && settings.redirectToProfile) {
         if (!canRedirect()) {
-          console.warn('[TikTok Unhook] Redirect loop detected - aborting redirect.');
+          console.warn(LOG, 'Redirect loop detected - aborting redirect.');
+          showFeedIfStuck();
           return;
         }
+        consumeRedirect();
         redirectToProfile();
         return;
       }
 
       if (isExplore && settings.hideExploreFeed) {
         if (!canRedirect()) {
-          console.warn('[TikTok Unhook] Redirect loop detected - aborting redirect.');
+          console.warn(LOG, 'Redirect loop detected - aborting redirect.');
+          showFeedIfStuck();
           return;
         }
+        consumeRedirect();
         redirectToFollowing();
       }
     };
@@ -204,9 +249,11 @@ export default defineContentScript({
       for (let i = 0; i < 6 && node; i++) {
         if (node !== labelEl && node.querySelector('a, button')) {
           if (!node.hasAttribute(HIDDEN_MARK)) {
-            (node as HTMLElement).style.display = 'none';
+            // Tylko znakacznik - samo ukrycie robi CSS, inaczej wylaczenie
+            // "Ukryj sklep i reklamy" zostawiloby karty czarne do reloadu.
+            node.setAttribute(AD_BLOCK_ATTR, '1');
             node.setAttribute(HIDDEN_MARK, '1');
-            console.log('[TikTok Unhook] Hidden ad block.');
+            console.log(LOG, 'Hidden ad block.');
           }
           return;
         }
@@ -214,45 +261,124 @@ export default defineContentScript({
       }
     };
 
+    /**
+     * Czy zakladka wyglada na wybrana? TikTok oznacza aktywny zakladek przez
+     * `aria-selected` (i klase CSS-modulow z "active"). Sprawdzamy wszystkie
+     * trzy, bo wersje ukladu sie roznia.
+     */
+    const looksSelected = (el: Element): boolean => {
+      if (el.getAttribute('aria-selected') === 'true') return true;
+      if (el.getAttribute('aria-current') === 'true') return true;
+      if (el.getAttribute('data-selected') === 'true') return true;
+      const cls = (el.getAttribute('class') || '').toLowerCase();
+      return cls.includes('active') || cls.includes('selected');
+    };
+
+    const findCommentsTab = (tabButton: Element): HTMLElement | null => {
+      const siblings = tabButton.parentElement ? Array.from(tabButton.parentElement.children) : [];
+      const found = siblings.find(
+        (el) => el !== tabButton && COMMENTS_TAB_LABELS.includes((el.textContent || '').trim())
+      );
+      return found instanceof HTMLElement ? found : null;
+    };
+
+    /**
+     * Po ukryciu zakladki "You may like" nie wolno zostawic jej w stanie
+     * "wybrana, ale niewidoczna". TikTok wraca do niej sam - np. przy
+     * kazdej zmianie filmu, bez przebudowy paska zakladek - i wtedy
+     * uzytkownik czyta polecane komentarze, nie widzi zadnego zakladka
+     * i nie ma jak wrocic do prawdziwych. Dlatego wyboru "Komentarze"
+     * nie robimy raz: przypominamy go, ile razy ukryta zakladka wyglada
+     * na aktywna.
+     *
+     * Throttle chroni przed klikaniem w petli, a backoff przed sytuacja,
+     * w ktorej klik nie dziala (zly wykrywacz stanu) - wtedy kolejne
+     * probby odsuwaja sie maksymalnie do minuty.
+     */
+    const COMMENTS_SELECT_MIN_MS = 1500;
+    const COMMENTS_SELECT_MAX_MS = 60000;
+    let commentsSelectAt = 0;
+    let commentsSelectWait = COMMENTS_SELECT_MIN_MS;
+
     const hideRecommendTab = (labelEl: Element) => {
       let tabButton: Element | null = labelEl;
       for (let i = 0; i < 3 && tabButton; i++) {
         if (tabButton.tagName === 'BUTTON' || tabButton.getAttribute('role') === 'tab') break;
         tabButton = tabButton.parentElement;
       }
-      if (!tabButton || tabButton.hasAttribute(HIDDEN_MARK)) return;
+      if (!tabButton) return;
 
-      const siblings = tabButton.parentElement ? Array.from(tabButton.parentElement.children) : [];
-      const commentsTab = siblings.find(
-        (el) => el !== tabButton && COMMENTS_TAB_LABELS.includes((el.textContent || '').trim())
-      );
-      if (commentsTab instanceof HTMLElement) {
-        commentsTab.click();
+      const commentsTab = findCommentsTab(tabButton);
+      const alreadyHidden = tabButton.hasAttribute(RECOMMEND_TAB_ATTR);
+      const isSelected = looksSelected(tabButton);
+
+      // Nie chowamy zakladki, gdy nie mamy gdzie przeniesc uzytkownika.
+      // Lepiej zostawic "You may like" na ekranie niz uwiezic go w sekcji,
+      // ktorej nie da sie wybrac.
+      if (commentsTab && (!alreadyHidden || isSelected)) {
+        if (!alreadyHidden) console.log(LOG, 'Hidden "You may like" tab.');
+        tabButton.setAttribute(RECOMMEND_TAB_ATTR, '1');
+        tabButton.setAttribute(HIDDEN_MARK, '1');
       }
 
-      (tabButton as HTMLElement).style.display = 'none';
-      tabButton.setAttribute(HIDDEN_MARK, '1');
-      console.log('[TikTok Unhook] Hidden "You may like" tab.');
+      if (!commentsTab) return;
+
+      const now = Date.now();
+      // Przy pierwszym wykryciu klikamy od razu (tak bylo wczesniej).
+      // Później tylko wtedy, gdy ukryta zakladka jest aktywna.
+      const due = !alreadyHidden || isSelected;
+      if (!due || now - commentsSelectAt < commentsSelectWait) return;
+
+      commentsSelectAt = now;
+      commentsTab.click();
+
+      // Klik nie pomogl -> odsuwamy kolejne proby. Pomogl -> wracamy do min.
+      commentsSelectWait =
+        isSelected
+          ? Math.min(COMMENTS_SELECT_MAX_MS, commentsSelectWait * 3)
+          : COMMENTS_SELECT_MIN_MS;
+    };
+
+    /**
+     * Zdejmuje znaczniki ukrycia nadawane po tresci. Bez tego wylaczenie
+     * "Ukryj sklep i reklamy" nie odslanialoby ich az do przeladowania strony.
+     * HIDDEN_MARK czyscimy tylko na tych samych elementach, bo jest wspoldzielony
+     * wylacznie z tym skanem.
+     */
+    const clearTextHiddenMarks = () => {
+      document.querySelectorAll(TEXT_HIDE_ATTRS).forEach((el) => {
+        el.removeAttribute(AD_BLOCK_ATTR);
+        el.removeAttribute(RECOMMEND_TAB_ATTR);
+        el.removeAttribute(HIDDEN_MARK);
+      });
     };
 
     const MAX_SCAN_NODES = 4000;
 
     const scanForTextDistractions = (settings: TikTokUnhookSettings) => {
-      if (!settings.masterEnabled || !settings.hideAds) return;
+      if (!settings.masterEnabled || !settings.hideAds) {
+        // Wylaczona opcja musi natychmiast odslanic to, co ostatnio ukrylo sie
+        // po tresci - inaczej efekt zostalby do momentu przeladowania strony.
+        if (document.querySelector(TEXT_HIDE_ATTRS)) clearTextHiddenMarks();
+        return;
+      }
       if (!document.body || document.hidden) return;
 
-      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT, {
-        acceptNode: (el) =>
-          (el as Element).children.length === 0 ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP,
-      });
+      // Chodzimy po wezlach TEKSTOWYCH, a nie po elementach. Przy ~15k
+      // elementow (tylek ma tyle) wersja SHOW_ELEMENT + FILTER_SKIP odwiedzila
+      // kazdy wezel i sklejala textContent - 3.4 ms na przebieg. SHOW_TEXT
+      // daje ten sam wynik za ~1.0 ms: interesuja nas tylko liscie, czyli
+      // wezly tekstowe bez dzieci-elementow.
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
 
       let node: Node | null;
       let visited = 0;
       while ((node = walker.nextNode()) && visited < MAX_SCAN_NODES) {
         visited++;
-        const el = node as Element;
+        const el = (node as Text).parentElement;
+        if (!el || el.children.length !== 0) continue;
         if (el.hasAttribute(HIDDEN_MARK)) continue;
-        const text = (el.textContent || '').trim();
+        const text = (node.nodeValue || '').trim();
         if (!text || text.length > 20) continue;
 
         if (AD_LABELS.includes(text)) {
@@ -264,27 +390,79 @@ export default defineContentScript({
     };
 
     // 1c. Filtr "Viral Only" dla /following
-    const parseFormattedCount = (raw: string): number | null => {
-      const text = raw.trim().toUpperCase().replace(/\s+/g, '');
-      if (!text) return null;
-      const match = text.match(/^([\d.,]+)([KMB]?)$/);
-      if (!match) return null;
 
-      let numStr = match[1];
-      if (match[2]) {
-        numStr = numStr.replace(/,/g, '.');
-      } else {
-        numStr = numStr.replace(/,/g, '');
-      }
-      const num = parseFloat(numStr);
-      if (Number.isNaN(num)) return null;
-
-      const multiplier =
-        match[2] === 'K' ? 1_000 : match[2] === 'M' ? 1_000_000 : match[2] === 'B' ? 1_000_000_000 : 1;
-      return Math.round(num * multiplier);
+    /** Mnozniki skrotow, ktore TikTok uzywa w roznych jezykach interfejsu. */
+    const COUNT_SUFFIXES: Record<string, number> = {
+      k: 1_000, // 1.2K
+      tys: 1_000, // 1,2 tys.  (PL)
+      ty: 1_000,
+      m: 1_000_000,
+      mln: 1_000_000, // 1,2 mln  (PL)
+      mio: 1_000_000, // 1,2 Mio. (DE)
+      mil: 1_000_000,
+      b: 1_000_000_000,
+      bn: 1_000_000_000,
+      mld: 1_000_000_000, // 1,2 mld  (PL)
+      mrd: 1_000_000_000, // 1,2 Mrd. (DE)
     };
 
+    /**
+     * Liczniki TikToka sa zalezne od jezyka: "1.2K" (EN), "1,2 tys." (PL),
+     * "1 234" (separator tysiecy). Poprzednia wersja rozumiała wylacznie
+     * K/M/B, wiec dla polskiego konta filtr wiralowy nigdy nie zadzialal -
+     * parse zwracalo null i karta byla pomijana.
+     */
+    const parseFormattedCount = (raw: string): number | null => {
+      const text = (raw || '')
+        .toLowerCase()
+        .replace(/[\s\u00a0\u202f\u2009]+/g, '');
+      if (!text) return null;
+
+      const match = text.match(/^([\d.,]+)([a-z]{0,4})\.?$/);
+      if (!match) return null;
+
+      const digits = match[1];
+      const suffix = match[2];
+
+      if (!suffix) {
+        // Pelna liczba - kropki i przecinki sa tu separatorami tysiecy.
+        const plain = digits.replace(/[.,]/g, '');
+        if (!plain) return null;
+        const value = parseInt(plain, 10);
+        return Number.isFinite(value) ? value : null;
+      }
+
+      const multiplier = COUNT_SUFFIXES[suffix];
+      if (!multiplier) return null;
+
+      // Przy skrocie separator dziesietny to ostatni z wystapionych znakow,
+      // a poprzedzajace go sa separatorami tysiecy ("1.234,5 tys.").
+      const lastSep = Math.max(digits.lastIndexOf('.'), digits.lastIndexOf(','));
+      const normalized =
+        lastSep === -1
+          ? digits
+          : `${digits.slice(0, lastSep).replace(/[.,]/g, '')}.${digits.slice(lastSep + 1).replace(/[.,]/g, '')}`;
+
+      const value = parseFloat(normalized);
+      if (!Number.isFinite(value)) return null;
+      return Math.round(value * multiplier);
+    };
+
+    /**
+     * Karta zajmujaca najwieksza czesc ekranu. Jedna przebieg skanu woła to
+     * dwa razy (licznik filmow + filtr wiralny), a kazde wywolanie robi
+     * getBoundingClientRect dla kazdej karty - czyli wymuszony layout na
+     * ~380 elementach. Cache na 250 ms daje ten sam wynik za jedno liczenie.
+     */
+    const ACTIVE_CARD_TTL_MS = 250;
+    let activeCardAt = 0;
+    let activeCardValue: Element | null = null;
+
     const getActiveFeedCard = (): Element | null => {
+      const now = Date.now();
+      if (now - activeCardAt < ACTIVE_CARD_TTL_MS) return activeCardValue;
+      activeCardAt = now;
+
       const cards = document.querySelectorAll('[data-e2e="recommend-list-item-container"]');
       let best: Element | null = null;
       let bestVisible = 0;
@@ -296,7 +474,8 @@ export default defineContentScript({
           best = card;
         }
       });
-      return bestVisible > window.innerHeight * 0.5 ? best : null;
+      activeCardValue = bestVisible > window.innerHeight * 0.5 ? best : null;
+      return activeCardValue;
     };
 
     const SKIP_COOLDOWN_MS = 1200;
@@ -314,6 +493,10 @@ export default defineContentScript({
       if (!settings.masterEnabled || !settings.viralFilterEnabled) return;
       if (!window.location.pathname.startsWith('/following')) return;
       if (document.hidden) return;
+      // Filtr dziala tylko w strumieniu filmow - bez tego
+      // [data-e2e="recommend-list-item-container"] na stronie profilu
+      // moglby zostac uznany za film i przeskakiwany.
+      if (!document.querySelector('[data-e2e="feed-navigation-next"]')) return;
       const now = Date.now();
       if (now < backoffUntil) return;
       if (now - lastSkipAt < SKIP_COOLDOWN_MS) return;
@@ -335,12 +518,12 @@ export default defineContentScript({
         if (nextBtn) {
           consecutiveSkips++;
           lastSkipAt = now;
-          console.log(`[TikTok Unhook] Skipping non-viral video (${likes} likes, ${comments} comments).`);
+          console.log(LOG, `Skipping non-viral video (${likes} likes, ${comments} comments).`);
           nextBtn.click();
           if (consecutiveSkips >= STUCK_STREAK_THRESHOLD) {
             backoffUntil = now + STUCK_BACKOFF_MS;
             consecutiveSkips = 0;
-            console.log('[TikTok Unhook] Many non-viral videos in a row - pausing skip briefly.');
+            console.log(LOG, 'Many non-viral videos in a row - pausing skip briefly.');
           }
         }
       } else {
@@ -350,10 +533,10 @@ export default defineContentScript({
 
     const SEARCH_INPUT_ATTR = 'data-unhook-search-intercepted';
     const SEARCH_UNLOCKED_UNTIL_KEY = 'unhook_search_unlocked_until_v1';
-    const SEARCH_UNLOCK_MODAL_ID = 'tiktok-unhook-search-unlock-modal';
-    const SEARCH_LOCK_OVERLAY_ID = 'tiktok-unhook-search-lock-overlay';
-    const SEARCH_PILL_ID = 'tiktok-unhook-search-pill';
-    const SEARCH_TOAST_ID = 'tiktok-unhook-unlock-toast';
+    const SEARCH_UNLOCK_MODAL_ID = 'unhook-search-unlock-modal';
+    const SEARCH_LOCK_OVERLAY_ID = 'unhook-search-lock-overlay';
+    const SEARCH_PILL_ID = 'unhook-search-pill';
+    const SEARCH_TOAST_ID = 'unhook-unlock-toast';
     const UNLOCK_DURATION_MS = 5 * 60 * 1000;
     const TARGET_CHARS_COUNT = 30;
 
@@ -395,471 +578,136 @@ export default defineContentScript({
       }
     };
 
-    const generateRandomChallenge = (length = 30): string => {
-      const chars = '23456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz';
-      let res = '';
-      for (let i = 0; i < length; i++) {
-        res += chars.charAt(Math.floor(Math.random() * chars.length));
-      }
-      return res;
-    };
-
-    // --- Wyglad w stylu TikToka ---
-    const TT_FONT =
-      '"TikTokFont", "TikTokDisplayFont", ProximaNova, -apple-system, BlinkMacSystemFont, ' +
-      '"Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif';
-    const TT_RED = '#FE2C55';
-    const TT_CYAN = '#25F4EE';
-    const TT_SURFACE = '#1F1F23';
-    const TT_SURFACE_SOFT = 'rgba(255,255,255,0.06)';
-    const TT_BORDER = 'rgba(255,255,255,0.12)';
-
     let searchPillTimer: number | null = null;
-    let sessionToastTimer: number | null = null;
 
-    const showSessionToast = (msg: string) => {
-      let toast = document.getElementById(SEARCH_TOAST_ID);
-      if (!toast) {
-        toast = document.createElement('div');
-        toast.id = SEARCH_TOAST_ID;
-        toast.style.cssText =
-          'position:fixed;bottom:28px;left:50%;transform:translateX(-50%);z-index:2147483647;' +
-          `background:${TT_SURFACE};color:#fff;border:1px solid ${TT_BORDER};border-radius:8px;` +
-          `padding:11px 18px;font-size:14px;font-weight:600;font-family:${TT_FONT};` +
-          'box-shadow:0 8px 28px rgba(0,0,0,0.5);';
-        document.body.appendChild(toast);
+    const showSessionToast = (msg: string) => showPageToast(SEARCH_TOAST_ID, msg);
+
+    const codeStrings = (t: TranslationStrings) => ({
+      codeLabel: t.codeLabel,
+      codeNew: t.codeNew,
+      placeholder: t.codeInputPlaceholder,
+      pasteBlocked: t.codePasteBlocked,
+      mismatch: t.codeMismatch,
+      count: t.codeCharsCount,
+      close: t.codeCloseLabel,
+    });
+
+    const stopSearchPill = () => {
+      document.getElementById(SEARCH_PILL_ID)?.remove();
+      if (searchPillTimer) {
+        window.clearInterval(searchPillTimer);
+        searchPillTimer = null;
       }
-      toast.textContent = msg;
-      if (sessionToastTimer) window.clearTimeout(sessionToastTimer);
-      sessionToastTimer = window.setTimeout(() => {
-        sessionToastTimer = null;
-        document.getElementById(SEARCH_TOAST_ID)?.remove();
-      }, 3500);
     };
 
-    const updateSearchPill = (lang: 'en' | 'pl') => {
-      const existing = document.getElementById(SEARCH_PILL_ID);
-      if (!currentSettings?.masterEnabled || !currentSettings?.searchUnlockChallenge || !isSearchUnlocked()) {
-        if (existing) existing.remove();
-        if (searchPillTimer) {
-          window.clearInterval(searchPillTimer);
-          searchPillTimer = null;
-        }
+    const relockSearch = () => {
+      clearUnlockedSession();
+      stopSearchPill();
+      if (currentSettings) {
+        handleSearchInterception(currentSettings);
+        handleSearchPageGuard(currentSettings);
+      }
+    };
+
+    const updateSearchPill = () => {
+      if (
+        !currentSettings?.masterEnabled ||
+        !currentSettings?.searchUnlockChallenge ||
+        !isSearchUnlocked()
+      ) {
+        stopSearchPill();
         return;
       }
 
-      const t = getT(lang);
-      let pill = existing;
-      if (!pill) {
-        pill = document.createElement('div');
-        pill.id = SEARCH_PILL_ID;
-        pill.style.cssText =
-          'position:fixed;top:70px;right:20px;z-index:2147483640;' +
-          `background:${TT_SURFACE};border:1px solid ${TT_BORDER};border-radius:999px;` +
-          'padding:7px 8px 7px 14px;box-shadow:0 6px 20px rgba(0,0,0,0.4);' +
-          `display:flex;align-items:center;gap:10px;font-family:${TT_FONT};font-size:13px;color:#fff;`;
-        document.body.appendChild(pill);
-      }
-
-      const renderPillContent = () => {
+      const paintPill = () => {
         const remainingMs = getSearchRemainingMs();
         if (remainingMs <= 0) {
-          clearUnlockedSession();
-          if (pill) pill.remove();
-          if (searchPillTimer) {
-            window.clearInterval(searchPillTimer);
-            searchPillTimer = null;
-          }
-          if (currentSettings) {
-            handleSearchInterception(currentSettings);
-            handleSearchPageGuard(currentSettings);
-          }
+          relockSearch();
           return;
         }
-
+        // Język czytamy przy każdym odświeżeniu: pigułka żyje 5 minut
+        // i w tym czasie użytkownik może go przełączyć w popupie.
+        const t = getT(currentSettings?.language || 'en');
         const totalSecs = Math.ceil(remainingMs / 1000);
-        const mins = Math.floor(totalSecs / 60);
-        const secs = totalSecs % 60;
-
-        while (pill?.firstChild) pill.removeChild(pill.firstChild);
-
-        const timeSpan = document.createElement('span');
-        timeSpan.style.cssText = `color:${TT_CYAN};font-weight:600;`;
-        timeSpan.textContent = t.searchUnlockStatusUnlocked(mins, secs);
-
-        const lockBtn = document.createElement('button');
-        lockBtn.type = 'button';
-        lockBtn.textContent = t.searchUnlockLockNow;
-        lockBtn.style.cssText =
-          `background:${TT_RED};border:none;color:#fff;font-family:${TT_FONT};` +
-          'font-size:12px;font-weight:600;padding:5px 12px;border-radius:999px;cursor:pointer;transition:filter .15s;';
-        lockBtn.onmouseover = () => {
-          lockBtn.style.filter = 'brightness(1.12)';
-        };
-        lockBtn.onmouseout = () => {
-          lockBtn.style.filter = 'none';
-        };
-        lockBtn.onclick = (e) => {
-          e.preventDefault();
-          clearUnlockedSession();
-          if (pill) pill.remove();
-          if (searchPillTimer) {
-            window.clearInterval(searchPillTimer);
-            searchPillTimer = null;
-          }
-          if (currentSettings) {
-            handleSearchInterception(currentSettings);
-            handleSearchPageGuard(currentSettings);
-          }
-        };
-
-        pill?.appendChild(timeSpan);
-        pill?.appendChild(lockBtn);
+        renderPill({
+          id: SEARCH_PILL_ID,
+          top: 70,
+          text: t.searchUnlockStatusUnlocked(Math.floor(totalSecs / 60), totalSecs % 60),
+          buttonLabel: t.searchUnlockLockNow,
+          onButton: relockSearch,
+        });
       };
 
-      renderPillContent();
-
-      if (!searchPillTimer) {
-        searchPillTimer = window.setInterval(renderPillContent, 1000);
-      }
-    };
-
-    /** Ikonka kluczyka rysowana jako SVG - bez emoji, zeby trzymac styl TikToka. */
-    const buildLockGlyph = (size = 22): SVGSVGElement => {
-      const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-      svg.setAttribute('viewBox', '0 0 24 24');
-      svg.setAttribute('width', String(size));
-      svg.setAttribute('height', String(size));
-      svg.setAttribute('fill', 'none');
-      svg.setAttribute('stroke', 'currentColor');
-      svg.setAttribute('stroke-width', '2');
-      svg.setAttribute('stroke-linecap', 'round');
-      svg.setAttribute('stroke-linejoin', 'round');
-
-      const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-      rect.setAttribute('x', '3');
-      rect.setAttribute('y', '11');
-      rect.setAttribute('width', '18');
-      rect.setAttribute('height', '11');
-      rect.setAttribute('rx', '2');
-
-      const shackle = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-      shackle.setAttribute('d', 'M7 11V7a5 5 0 0 1 10 0v4');
-
-      svg.appendChild(rect);
-      svg.appendChild(shackle);
-      return svg;
+      paintPill();
+      if (!searchPillTimer) searchPillTimer = window.setInterval(paintPill, 1000);
     };
 
     const openSearchUnlockModal = (lang: 'en' | 'pl' = currentSettings?.language || 'en') => {
-      if (document.getElementById(SEARCH_UNLOCK_MODAL_ID)) {
-        document.querySelector<HTMLInputElement>(`#${SEARCH_UNLOCK_MODAL_ID} input`)?.focus();
-        return;
-      }
-
       const t = getT(lang);
-      let challengeCode = generateRandomChallenge(TARGET_CHARS_COUNT);
-
-      const backdrop = document.createElement('div');
-      backdrop.id = SEARCH_UNLOCK_MODAL_ID;
-      backdrop.style.cssText =
-        'position:fixed;inset:0;z-index:2147483647;background:rgba(0,0,0,0.72);' +
-        'backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center;padding:20px;' +
-        `font-family:${TT_FONT};color:#fff;`;
-
-      const card = document.createElement('div');
-      card.style.cssText =
-        `background:${TT_SURFACE};border-radius:12px;padding:28px;max-width:420px;width:100%;` +
-        'box-shadow:0 16px 48px rgba(0,0,0,0.6);display:flex;flex-direction:column;gap:0;' +
-        'position:relative;animation:unhookFadeIn 0.18s ease-out;box-sizing:border-box;';
-
-      const closeModal = () => {
-        backdrop.remove();
-        window.removeEventListener('keydown', onKeyDownEsc);
-      };
-
-      const onKeyDownEsc = (e: KeyboardEvent) => {
-        if (e.key === 'Escape') closeModal();
-      };
-      window.addEventListener('keydown', onKeyDownEsc);
-      backdrop.addEventListener('click', (e) => {
-        if (e.target === backdrop) closeModal();
-      });
-
-      // --- Zamkniecie ---
-      const closeBtn = document.createElement('button');
-      closeBtn.type = 'button';
-      closeBtn.setAttribute('aria-label', 'Close');
-      closeBtn.textContent = '✕';
-      closeBtn.style.cssText =
-        'position:absolute;top:16px;right:16px;background:none;border:none;color:rgba(255,255,255,0.45);' +
-        `font-size:16px;line-height:1;cursor:pointer;padding:6px;border-radius:6px;font-family:${TT_FONT};transition:color .15s;`;
-      closeBtn.onmouseover = () => {
-        closeBtn.style.color = '#fff';
-      };
-      closeBtn.onmouseout = () => {
-        closeBtn.style.color = 'rgba(255,255,255,0.45)';
-      };
-      closeBtn.onclick = closeModal;
-
-      // --- Naglowek ---
-      const lockBadge = document.createElement('div');
-      lockBadge.style.cssText =
-        `width:52px;height:52px;border-radius:50%;background:${TT_RED};color:#fff;` +
-        'display:flex;align-items:center;justify-content:center;margin:0 auto 16px auto;' +
-        `box-shadow:0 0 0 6px rgba(254,44,85,0.14);`;
-      lockBadge.appendChild(buildLockGlyph(24));
-
-      const titleEl = document.createElement('h2');
-      titleEl.style.cssText =
-        `margin:0 0 6px 0;font-family:${TT_FONT};font-size:22px;font-weight:700;` +
-        'line-height:1.25;color:#fff;text-align:center;letter-spacing:-0.02em;';
-      titleEl.textContent = t.searchUnlockModalTitle;
-
-      const subtitleEl = document.createElement('p');
-      subtitleEl.style.cssText =
-        'margin:0 0 20px 0;font-size:14px;line-height:1.45;color:rgba(255,255,255,0.6);text-align:center;';
-      subtitleEl.textContent = t.searchUnlockModalSubtitle;
-
-      // --- Kod do przepisania ---
-      const codeBox = document.createElement('div');
-      codeBox.style.cssText =
-        `background:${TT_SURFACE_SOFT};border-radius:8px;padding:14px 16px;margin-bottom:12px;` +
-        'display:flex;flex-direction:column;gap:10px;';
-
-      const codeLabelRow = document.createElement('div');
-      codeLabelRow.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:8px;';
-
-      const codeLabel = document.createElement('span');
-      codeLabel.style.cssText =
-        'font-size:11px;font-weight:600;color:rgba(255,255,255,0.5);text-transform:uppercase;letter-spacing:0.08em;';
-      codeLabel.textContent = t.searchUnlockCodeLabel;
-
-      const refreshCodeBtn = document.createElement('button');
-      refreshCodeBtn.type = 'button';
-      refreshCodeBtn.textContent = t.searchUnlockNewCode;
-      refreshCodeBtn.style.cssText =
-        `background:none;border:none;color:${TT_CYAN};font-family:${TT_FONT};font-size:12px;` +
-        'font-weight:600;cursor:pointer;padding:2px 4px;transition:opacity .15s;';
-      refreshCodeBtn.onmouseover = () => {
-        refreshCodeBtn.style.opacity = '0.7';
-      };
-      refreshCodeBtn.onmouseout = () => {
-        refreshCodeBtn.style.opacity = '1';
-      };
-
-      codeLabelRow.appendChild(codeLabel);
-      codeLabelRow.appendChild(refreshCodeBtn);
-
-      // Kod rysujemy jako osobne 5-znakowe bloki, zeby zawijal sie MIEDZY nimi,
-      // a nie w srodku bloku - inaczej ostatnia grupa pekala na dwie linie.
-      const codeDisplay = document.createElement('div');
-      codeDisplay.style.cssText =
-        'display:flex;flex-wrap:wrap;justify-content:center;gap:8px 16px;user-select:none;' +
-        'max-width:220px;margin:0 auto;';
-
-      const renderCode = (code: string) => {
-        while (codeDisplay.firstChild) codeDisplay.removeChild(codeDisplay.firstChild);
-        (code.match(/.{1,5}/g) || [code]).forEach((chunk) => {
-          const span = document.createElement('span');
-          span.style.cssText =
-            'font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:16px;' +
-            'font-weight:600;letter-spacing:0.1em;color:#fff;white-space:nowrap;';
-          span.textContent = chunk;
-          codeDisplay.appendChild(span);
-        });
-      };
-      renderCode(challengeCode);
-
-      refreshCodeBtn.onclick = () => {
-        challengeCode = generateRandomChallenge(TARGET_CHARS_COUNT);
-        renderCode(challengeCode);
-      };
-
-      codeBox.appendChild(codeLabelRow);
-      codeBox.appendChild(codeDisplay);
-
-      // --- Ostrzezenie o wklejaniu ---
-      const pasteWarning = document.createElement('div');
-      pasteWarning.style.cssText =
-        `display:none;background:rgba(254,44,85,0.12);border-radius:6px;padding:8px 12px;margin-bottom:10px;` +
-        `font-size:12.5px;color:${TT_RED};font-weight:600;text-align:center;`;
-      pasteWarning.textContent = t.searchUnlockPasteBlocked;
-
-      let pasteWarningTimer: number | null = null;
-      const showPasteWarning = () => {
-        pasteWarning.style.display = 'block';
-        if (pasteWarningTimer) window.clearTimeout(pasteWarningTimer);
-        pasteWarningTimer = window.setTimeout(() => {
-          pasteWarning.style.display = 'none';
-        }, 3000);
-      };
-
-      // --- Pole tekstowe ---
-      const input = document.createElement('input');
-      input.type = 'text';
-      input.placeholder = t.searchUnlockInputPlaceholder;
-      input.autocomplete = 'off';
-      input.spellcheck = false;
-      input.style.cssText =
-        'width:100%;box-sizing:border-box;padding:13px 14px;border-radius:8px;' +
-        `background:${TT_SURFACE_SOFT};border:1px solid transparent;color:#fff;font-size:14px;` +
-        'font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:0.06em;' +
-        'outline:none;transition:border-color .15s,background-color .15s;';
-      input.onfocus = () => {
-        input.style.borderColor = TT_RED;
-      };
-      input.onblur = () => {
-        input.style.borderColor = 'transparent';
-      };
-      input.addEventListener('paste', (e) => {
-        e.preventDefault();
-        showPasteWarning();
-      });
-
-      // --- Postep ---
-      const progressRow = document.createElement('div');
-      progressRow.style.cssText = 'display:flex;align-items:center;gap:12px;margin:12px 0 18px 0;';
-
-      const progressBarTrack = document.createElement('div');
-      progressBarTrack.style.cssText =
-        'flex:1;height:3px;background:rgba(255,255,255,0.12);border-radius:999px;overflow:hidden;';
-
-      const progressBarFill = document.createElement('div');
-      progressBarFill.style.cssText =
-        `height:100%;width:0%;background:${TT_RED};border-radius:999px;transition:width .15s ease,background-color .2s ease;`;
-      progressBarTrack.appendChild(progressBarFill);
-
-      const countSpan = document.createElement('span');
-      countSpan.style.cssText =
-        'font-size:12.5px;font-weight:600;color:rgba(255,255,255,0.5);font-variant-numeric:tabular-nums;white-space:nowrap;';
-      countSpan.textContent = t.searchUnlockCharsCount(0, TARGET_CHARS_COUNT);
-
-      progressRow.appendChild(progressBarTrack);
-      progressRow.appendChild(countSpan);
-
-      // --- Przyciski ---
-      const unlockBtn = document.createElement('button');
-      unlockBtn.type = 'button';
-      unlockBtn.textContent = t.searchUnlockBtn;
-      unlockBtn.disabled = true;
-
-      const setUnlockBtnState = (enabled: boolean) => {
-        unlockBtn.disabled = !enabled;
-        unlockBtn.style.cssText =
-          `width:100%;padding:12px 18px;border-radius:8px;font-family:${TT_FONT};font-size:15px;` +
-          'font-weight:700;border:none;transition:filter .15s,background-color .2s,color .2s;' +
-          (enabled
-            ? `background:${TT_RED};color:#fff;cursor:pointer;`
-            : 'background:rgba(255,255,255,0.08);color:rgba(255,255,255,0.3);cursor:not-allowed;');
-      };
-      setUnlockBtnState(false);
-      unlockBtn.onmouseover = () => {
-        if (!unlockBtn.disabled) unlockBtn.style.filter = 'brightness(1.1)';
-      };
-      unlockBtn.onmouseout = () => {
-        unlockBtn.style.filter = 'none';
-      };
-
-      const backBtn = document.createElement('button');
-      backBtn.type = 'button';
-      backBtn.textContent = t.searchUnlockBackBtn;
-      backBtn.style.cssText =
-        `width:100%;padding:11px 12px;margin-top:8px;border-radius:8px;background:none;border:none;` +
-        `color:rgba(255,255,255,0.5);font-family:${TT_FONT};font-size:14px;font-weight:600;cursor:pointer;transition:color .15s;`;
-      backBtn.onmouseover = () => {
-        backBtn.style.color = '#fff';
-      };
-      backBtn.onmouseout = () => {
-        backBtn.style.color = 'rgba(255,255,255,0.5)';
-      };
-      backBtn.onclick = () => {
-        closeModal();
-        if (window.location.pathname.startsWith('/search')) {
-          window.location.href = '/following';
-        }
-      };
-
-      const checkAndUnlock = () => {
-        const val = input.value;
-        if (val.length < TARGET_CHARS_COUNT || new Set(val.split('')).size < 4) return;
-
-        setUnlockedSession();
-        closeModal();
-
-        if (currentSettings) {
-          handleSearchInterception(currentSettings);
-          handleSearchPageGuard(currentSettings);
-          updateSearchPill(currentSettings.language);
-        }
-
-        showSessionToast(t.searchUnlockSuccessToast);
-
-        window.setTimeout(() => {
-          const realInput = document.querySelector<HTMLInputElement>(
-            'input[data-e2e="search-user-input"], input[type="search"], form[action*="/search"] input'
-          );
-          if (realInput) {
-            realInput.focus();
-            realInput.select();
+      openCodeChallenge({
+        id: SEARCH_UNLOCK_MODAL_ID,
+        length: TARGET_CHARS_COUNT,
+        title: t.searchUnlockModalTitle,
+        subtitle: t.searchUnlockModalSubtitle(TARGET_CHARS_COUNT),
+        confirmLabel: t.searchUnlockBtn,
+        secondaryLabel: t.searchUnlockBackBtn,
+        onSecondary: () => {
+          if (window.location.pathname.startsWith('/search')) {
+            window.location.href = '/following';
           }
-        }, 150);
-      };
+        },
+        strings: codeStrings(t),
+        onSuccess: () => {
+          setUnlockedSession();
 
-      input.addEventListener('input', () => {
-        const len = input.value.length;
-        const pct = Math.min(100, Math.round((len / TARGET_CHARS_COUNT) * 100));
-        const isValid = len >= TARGET_CHARS_COUNT && new Set(input.value.split('')).size >= 4;
+          if (currentSettings) {
+            handleSearchInterception(currentSettings);
+            handleSearchPageGuard(currentSettings);
+          }
 
-        progressBarFill.style.width = `${pct}%`;
-        progressBarFill.style.backgroundColor = isValid ? TT_CYAN : TT_RED;
-        countSpan.textContent = t.searchUnlockCharsCount(len, TARGET_CHARS_COUNT);
-        countSpan.style.color = isValid ? TT_CYAN : 'rgba(255,255,255,0.5)';
-        setUnlockBtnState(isValid);
+          showSessionToast(t.searchUnlockSuccessToast);
+
+          window.setTimeout(() => {
+            const realInput = document.querySelector<HTMLInputElement>(
+              'input[data-e2e="search-user-input"], input[type="search"], form[action*="/search"] input'
+            );
+            if (realInput) {
+              realInput.focus();
+              realInput.select();
+            }
+          }, 150);
+        },
       });
-
-      input.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') {
-          e.preventDefault();
-          checkAndUnlock();
-        }
-      });
-
-      unlockBtn.onclick = checkAndUnlock;
-
-      card.appendChild(closeBtn);
-      card.appendChild(lockBadge);
-      card.appendChild(titleEl);
-      card.appendChild(subtitleEl);
-      card.appendChild(codeBox);
-      card.appendChild(pasteWarning);
-      card.appendChild(input);
-      card.appendChild(progressRow);
-      card.appendChild(unlockBtn);
-      card.appendChild(backBtn);
-      backdrop.appendChild(card);
-      document.body.appendChild(backdrop);
-
-      window.setTimeout(() => input.focus(), 60);
     };
 
     const handleSearchInterception = (settings: TikTokUnhookSettings) => {
-      const searchLocked = settings.masterEnabled && settings.searchUnlockChallenge && !isSearchUnlocked();
+      const lockActive = settings.masterEnabled && settings.searchUnlockChallenge;
+      const searchLocked = lockActive && !isSearchUnlocked();
 
-      if (!settings.masterEnabled || !settings.searchUnlockChallenge) {
-        updateSearchPill(settings.language);
+      if (!lockActive) {
+        updateSearchPill();
+
+        // Placeholder przywracamy tylko tam, gdzie go kiedys ustawilismy.
+        // Bez tego skasowana blokada przepisywala dwa selektory na calym
+        // dokumencie przy kazdym skanie, mimo ze nie ma czego przywracać.
+        if (!document.querySelector(`[${SEARCH_INPUT_ATTR}]`)) return;
 
         const inputs = document.querySelectorAll<HTMLInputElement>(
-          'input[data-e2e="search-user-input"], input[type="search"], form[action*="/search"] input'
+          `input[data-e2e="search-user-input"], input[type="search"], form[action*="/search"] input`
         );
         inputs.forEach((input) => {
           const orig = input.getAttribute('data-unhook-orig-placeholder');
           if (orig !== null) input.placeholder = orig;
+          // Znacznik zdejmujemy razem z przywroceniem placeholdera - inaczej
+          // szybka sciezka wyzej nigdy nie zadzialalaby, a wtyczka pamietalaby
+          // o polu, ktore juz nie blokuje.
+          input.removeAttribute(SEARCH_INPUT_ATTR);
+          input.removeAttribute('data-unhook-orig-placeholder');
         });
         return;
       }
 
-      updateSearchPill(settings.language);
+      updateSearchPill();
 
       const inputs = document.querySelectorAll<HTMLInputElement>(
         'input[data-e2e="search-user-input"], input[type="search"], form[action*="/search"] input'
@@ -874,10 +722,11 @@ export default defineContentScript({
         }
 
         if (searchLocked) {
-          input.placeholder = t.searchUnlockPlaceholderLocked;
+          const lockedPlaceholder = t.searchUnlockPlaceholderLocked;
+          if (input.placeholder !== lockedPlaceholder) input.placeholder = lockedPlaceholder;
         } else {
           const orig = input.getAttribute('data-unhook-orig-placeholder');
-          if (orig !== null) input.placeholder = orig;
+          if (orig !== null && input.placeholder !== orig) input.placeholder = orig;
         }
 
         if (!(input as any)._unhookLockFocusHandler) {
@@ -964,9 +813,9 @@ export default defineContentScript({
       });
     };
 
-    const handleSearchPageGuard = (settings: TikTokUnhookSettings) => {
-      const existingLockOverlay = document.getElementById(SEARCH_LOCK_OVERLAY_ID);
+    let searchLockScreen: BlockScreen | null = null;
 
+    const handleSearchPageGuard = (settings: TikTokUnhookSettings) => {
       const shouldBlock =
         settings.masterEnabled &&
         settings.searchUnlockChallenge &&
@@ -974,137 +823,383 @@ export default defineContentScript({
         window.location.pathname.startsWith('/search');
 
       if (!shouldBlock) {
-        existingLockOverlay?.remove();
+        searchLockScreen?.remove();
+        searchLockScreen = null;
         return;
       }
 
-      if (existingLockOverlay) return;
+      // document.body nie istnieje jeszcze na document_start przy wejsciu
+      // prosto na /search (skan ponowi probe przy pierwszej mutacji DOM).
+      if (!document.body) return;
+
+      if (searchLockScreen && document.getElementById(SEARCH_LOCK_OVERLAY_ID)) return;
 
       const t = getT(settings.language);
+      searchLockScreen = mountBlockScreen({
+        id: SEARCH_LOCK_OVERLAY_ID,
+        glyph: 'lock',
+        // Pasek nawigacji strony zostaje odsloniety, zeby dalo sie wyjsc z wynikow.
+        top: 60,
+        title: t.searchUnlockPageBlockedTitle,
+        text: t.searchUnlockPageBlockedDesc,
+        primary: {
+          label: t.searchUnlockBtn,
+          enabled: true,
+          onClick: () => openSearchUnlockModal(currentSettings?.language),
+        },
+        secondary: {
+          label: t.searchUnlockBackBtn,
+          onClick: () => {
+            window.location.href = '/following';
+          },
+        },
+      });
+    };
 
-      const overlay = document.createElement('div');
-      overlay.id = SEARCH_LOCK_OVERLAY_ID;
-      overlay.style.cssText =
-        'position:fixed;top:60px;left:0;right:0;bottom:0;z-index:999999;' +
-        'background:rgba(18,18,18,0.97);backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center;' +
-        `padding:20px;font-family:${TT_FONT};color:#fff;`;
+    // --- Zasłony: pauza na wejściu, limit dzienny, ciche godziny ---
+    const GUARD_SCREEN_ID = 'unhook-guard-screen';
+    const VEIL_ID = 'unhook-veil';
+    const PASS_MODAL_ID = 'unhook-pass-modal';
+    const PASS_PILL_ID = 'unhook-pass-pill';
+    const PASS_TOAST_ID = 'unhook-pass-toast';
+    const GATE_PASSED_KEY = 'unhook_gate_passed_v1';
+    const GUARD_CACHE_KEY = 'unhook_guard_cache_v1';
+    const PASS_MINUTES = Math.round(PASS_MS / 60000);
 
-      const card = document.createElement('div');
-      card.style.cssText =
-        'max-width:400px;width:100%;text-align:center;display:flex;flex-direction:column;align-items:center;gap:0;';
+    let guardState: GuardState = { editUntil: 0, ritualCount: 0, passUntil: 0, passCount: 0 };
+    let guardReady = false;
+    let guardScreen: BlockScreen | null = null;
+    let guardSignature = '';
+    let gateTimer: number | null = null;
+    let secondsToday = 0;
 
-      const badge = document.createElement('div');
-      badge.style.cssText =
-        `width:56px;height:56px;border-radius:50%;background:${TT_RED};color:#fff;` +
-        'display:flex;align-items:center;justify-content:center;margin-bottom:18px;' +
-        'box-shadow:0 0 0 7px rgba(254,44,85,0.14);';
-      badge.appendChild(buildLockGlyph(26));
+    // Pauza na wejściu pokazuje się raz na kartę. Bez dostępu do sessionStorage
+    // nie da się tego zapamiętać, więc wtedy nie pokazujemy jej wcale: lepsze to
+    // niż odliczanie przy każdym przeładowaniu.
+    const gatePassed = (): boolean => {
+      try {
+        return sessionStorage.getItem(GATE_PASSED_KEY) === '1';
+      } catch {
+        return true;
+      }
+    };
 
-      const titleEl = document.createElement('h2');
-      titleEl.style.cssText =
-        'margin:0 0 8px 0;font-size:24px;font-weight:700;color:#fff;letter-spacing:-0.02em;';
-      titleEl.textContent = t.searchUnlockPageBlockedTitle;
+    const markGatePassed = () => {
+      try {
+        sessionStorage.setItem(GATE_PASSED_KEY, '1');
+      } catch {
+        /* noop */
+      }
+    };
 
-      const descEl = document.createElement('p');
-      descEl.style.cssText =
-        'margin:0 0 24px 0;font-size:15px;color:rgba(255,255,255,0.6);line-height:1.5;';
-      descEl.textContent = t.searchUnlockPageBlockedDesc;
+    // Ustawienia przychodzą asynchronicznie, a strona zaczyna grać od razu.
+    // Poprzedni werdykt trzymamy więc w localStorage strony i na jego podstawie
+    // zasłaniamy ekran już na document_start, zanim storage odpowie.
+    let guardCacheWritten = '';
+    const writeGuardCache = (gate: boolean, block: boolean) => {
+      const value = JSON.stringify({ gate, block });
+      if (value === guardCacheWritten) return;
+      guardCacheWritten = value;
+      try {
+        localStorage.setItem(GUARD_CACHE_KEY, value);
+      } catch {
+        /* noop */
+      }
+    };
 
-      const unlockActionBtn = document.createElement('button');
-      unlockActionBtn.type = 'button';
-      unlockActionBtn.style.cssText =
-        `width:100%;padding:12px 18px;border-radius:8px;background:${TT_RED};color:#fff;` +
-        `font-family:${TT_FONT};font-weight:700;font-size:15px;border:none;cursor:pointer;transition:filter .15s;`;
-      unlockActionBtn.textContent = t.searchUnlockBtn;
-      unlockActionBtn.onmouseover = () => {
-        unlockActionBtn.style.filter = 'brightness(1.1)';
-      };
-      unlockActionBtn.onmouseout = () => {
-        unlockActionBtn.style.filter = 'none';
-      };
-      unlockActionBtn.onclick = () => openSearchUnlockModal(settings.language);
+    const liftVeil = () => {
+      document.getElementById(VEIL_ID)?.remove();
+    };
 
-      const backBtn = document.createElement('button');
-      backBtn.type = 'button';
-      backBtn.style.cssText =
-        'width:100%;padding:11px 16px;margin-top:8px;border-radius:8px;background:none;border:none;' +
-        `color:rgba(255,255,255,0.5);font-family:${TT_FONT};font-weight:600;font-size:14px;cursor:pointer;transition:color .15s;`;
-      backBtn.textContent = t.searchUnlockBackBtn;
-      backBtn.onmouseover = () => {
-        backBtn.style.color = '#fff';
-      };
-      backBtn.onmouseout = () => {
-        backBtn.style.color = 'rgba(255,255,255,0.5)';
-      };
-      backBtn.onclick = () => {
-        window.location.href = '/following';
-      };
+    const raiseVeilIfExpected = () => {
+      let cached: { gate?: unknown; block?: unknown } | null = null;
+      try {
+        cached = JSON.parse(localStorage.getItem(GUARD_CACHE_KEY) || 'null');
+      } catch {
+        return;
+      }
+      if (!cached) return;
+      if (cached.block !== true && !(cached.gate === true && !gatePassed())) return;
 
-      card.appendChild(badge);
-      card.appendChild(titleEl);
-      card.appendChild(descEl);
-      card.appendChild(unlockActionBtn);
-      card.appendChild(backBtn);
+      const veil = document.createElement('div');
+      veil.id = VEIL_ID;
+      veil.setAttribute(OWN_UI_ATTR, '1');
+      veil.style.cssText = `position:fixed;inset:0;z-index:2147483645;background:${UI.ink};`;
+      document.documentElement.appendChild(veil);
+      // Gdyby storage nie odpowiedział, strona nie może zostać czarna.
+      window.setTimeout(liftVeil, 3000);
+    };
+    raiseVeilIfExpected();
 
-      overlay.appendChild(card);
-      document.body.appendChild(overlay);
+    const leaveSite = () => {
+      window.location.replace('about:blank');
+    };
+
+    const clearGuardScreen = () => {
+      if (gateTimer !== null) {
+        window.clearInterval(gateTimer);
+        gateTimer = null;
+      }
+      guardScreen?.remove();
+      guardScreen = null;
+      guardSignature = '';
+      closeCodeChallenge(PASS_MODAL_ID);
+    };
+
+    const guardScreenIsUp = (signature: string): boolean =>
+      guardScreen !== null &&
+      guardSignature === signature &&
+      document.getElementById(GUARD_SCREEN_ID) !== null;
+
+    const endPass = () => {
+      guardState = { ...guardState, passUntil: 0 };
+      void updateGuardState({ passUntil: 0 });
+      evaluateGuard();
+    };
+
+    const openPassChallenge = () => {
+      const t = getT(currentSettings?.language || 'en');
+      const length = passCodeLength(guardState.passCount);
+      openCodeChallenge({
+        id: PASS_MODAL_ID,
+        length,
+        title: t.passModalTitle(PASS_MINUTES),
+        subtitle: t.passModalSubtitle(length),
+        confirmLabel: t.passConfirmBtn,
+        strings: codeStrings(t),
+        onSuccess: () => {
+          guardState = {
+            ...guardState,
+            passUntil: Date.now() + PASS_MS,
+            passCount: guardState.passCount + 1,
+          };
+          void updateGuardState({ passUntil: guardState.passUntil, passCount: guardState.passCount });
+          evaluateGuard();
+          showPageToast(PASS_TOAST_ID, t.passGrantedToast(PASS_MINUTES));
+        },
+      });
+    };
+
+    const showBlockVerdict = (
+      verdict: Exclude<BlockVerdict, { kind: 'none' }>,
+      settings: TikTokUnhookSettings
+    ) => {
+      const signature =
+        verdict.kind === 'quiet'
+          ? `quiet:${verdict.endsAt}:${settings.language}`
+          : `limit:${verdict.limitMinutes}:${settings.language}`;
+      if (guardScreenIsUp(signature)) return;
+
+      clearGuardScreen();
+      guardSignature = signature;
+      const t = getT(settings.language);
+      guardScreen = mountBlockScreen({
+        id: GUARD_SCREEN_ID,
+        shield: true,
+        glyph: verdict.kind === 'quiet' ? 'moon' : 'timer',
+        title: verdict.kind === 'quiet' ? t.quietTitle : t.limitTitle,
+        text:
+          verdict.kind === 'quiet'
+            ? t.quietDesc(formatClock(verdict.endsAt))
+            : t.limitDesc(verdict.limitMinutes),
+        // Wyjście jest głównym przyciskiem, przepustka tym mniej widocznym.
+        primary: { label: t.blockLeave, enabled: true, onClick: leaveSite },
+        secondary: { label: t.passBtn(PASS_MINUTES), onClick: openPassChallenge },
+      });
+    };
+
+    const showGate = (settings: TikTokUnhookSettings) => {
+      const signature = `gate:${settings.language}:${settings.entryGateSeconds}`;
+      if (guardScreenIsUp(signature)) return;
+
+      clearGuardScreen();
+      guardSignature = signature;
+      const t = getT(settings.language);
+
+      let remainingMs = settings.entryGateSeconds * 1000;
+      let lastAt = Date.now();
+      const secondsLeft = () => Math.ceil(remainingMs / 1000);
+
+      const screen = mountBlockScreen({
+        id: GUARD_SCREEN_ID,
+        shield: true,
+        glyph: 'hourglass',
+        bigNumber: String(secondsLeft()),
+        title: t.gateTitle,
+        text: t.gateSubtitle,
+        primary: {
+          label: t.gateCountdown(secondsLeft()),
+          enabled: false,
+          onClick: () => {
+            markGatePassed();
+            evaluateGuard();
+          },
+        },
+        secondary: { label: t.blockLeave, onClick: leaveSite },
+      });
+      guardScreen = screen;
+
+      gateTimer = window.setInterval(() => {
+        const now = Date.now();
+        // Odliczanie stoi, gdy karta jest w tle: pauzy nie da się "przeczekać"
+        // w innej karcie.
+        if (!document.hidden) remainingMs = Math.max(0, remainingMs - (now - lastAt));
+        lastAt = now;
+
+        if (remainingMs > 0) {
+          screen.setBigNumber(String(secondsLeft()));
+          screen.setPrimary(t.gateCountdown(secondsLeft()), false);
+          return;
+        }
+        if (gateTimer !== null) {
+          window.clearInterval(gateTimer);
+          gateTimer = null;
+        }
+        screen.setBigNumber('0');
+        screen.setPrimary(t.gateContinue, true);
+      }, 250);
+    };
+
+    const paintPassPill = (settings: TikTokUnhookSettings) => {
+      const leftMs = guardState.passUntil - Date.now();
+      // Pigułka ma sens tylko wtedy, gdy przepustka faktycznie coś zdejmuje.
+      const wouldBlock =
+        evaluateBlock(settings, { now: new Date(), secondsToday, passUntil: 0 }).kind !== 'none';
+      if (leftMs <= 0 || !wouldBlock) {
+        document.getElementById(PASS_PILL_ID)?.remove();
+        return;
+      }
+      const t = getT(settings.language);
+      const totalSecs = Math.ceil(leftMs / 1000);
+      renderPill({
+        id: PASS_PILL_ID,
+        top: 112,
+        text: t.passPill(Math.floor(totalSecs / 60), totalSecs % 60),
+        buttonLabel: t.passEndNow,
+        onButton: endPass,
+      });
+    };
+
+    /**
+     * Decyduje, czy strona ma być zasłonięta, i doprowadza ekran do tego stanu.
+     * Wołane po każdej zmianie ustawień, licznika czasu i przepustki oraz co
+     * sekundę (początek cichych godzin i koniec przepustki nie dają zdarzenia).
+     */
+    const evaluateGuard = () => {
+      const settings = currentSettings;
+      if (!settings || !guardReady) return;
+
+      const verdict = evaluateBlock(settings, {
+        now: new Date(),
+        secondsToday,
+        passUntil: guardState.passUntil,
+      });
+      const gateOn = settings.masterEnabled && settings.entryGateEnabled;
+
+      if (verdict.kind !== 'none') showBlockVerdict(verdict, settings);
+      else if (gateOn && !gatePassed()) showGate(settings);
+      else clearGuardScreen();
+
+      paintPassPill(settings);
+      writeGuardCache(gateOn, verdict.kind !== 'none');
+      liftVeil();
     };
 
     // --- Statystyki sesji (czas + filmy) ---
     const SESSION_MIN_SECONDS = 30;
     let sessionSeconds = 0;
     let sessionVideos = 0;
-    let dailyStats = { date: todayKey(), seconds: 0, videos: 0 };
-    let statsLastWrite = 0;
+    let unsavedVideos = 0;
     let statsStarted = false;
     const seenCards = new WeakSet<Element>();
 
-    const flushStats = async (force = false) => {
-      const now = Date.now();
-      if (!force && now - statsLastWrite < 60000) return;
-      statsLastWrite = now;
-      await saveDailyStats(dailyStats);
-    };
-
     const countActiveVideo = () => {
       if (document.hidden || !document.body) return;
+      if (!currentSettings?.masterEnabled) return;
       const card = getActiveFeedCard();
       if (!card || seenCards.has(card)) return;
       seenCards.add(card);
       sessionVideos++;
-      dailyStats.videos++;
+      unsavedVideos++;
     };
 
     const startStatsTracking = async () => {
       if (statsStarted) return;
       statsStarted = true;
 
-      const existing = await getDailyStats();
-      if (existing && existing.date === todayKey()) dailyStats = existing;
-      else dailyStats = { date: todayKey(), seconds: 0, videos: 0 };
+      const [stats, guard] = await Promise.all([addToDailyStats(0, 0), getGuardState()]);
+      secondsToday = stats.seconds;
+      guardState = guard;
+      guardReady = true;
+      evaluateGuard();
+      window.setInterval(evaluateGuard, 1000);
 
-      window.setInterval(() => {
-        if (document.hidden || !document.body) return;
-        if (dailyStats.date !== todayKey()) dailyStats = { date: todayKey(), seconds: 0, videos: 0 };
-        sessionSeconds += 15;
-        dailyStats.seconds += 15;
-        void flushStats(false);
-      }, 15000);
-
-      document.addEventListener('visibilitychange', () => {
-        if (document.hidden) void flushStats(true);
+      onGuardChange((next) => {
+        guardState = next;
+        evaluateGuard();
+      });
+      // Czas naliczony w innych kartach liczy się do tego samego limitu.
+      onDailyStatsChange((next) => {
+        secondsToday = next && next.date === todayKey() ? next.seconds : 0;
+        evaluateGuard();
       });
 
+      // Liczymy REALNY uplyw czasu, a nie "15s na tick". Przegladarka throttluje
+      // timery w tle, wiec stare podejscie zanizalo czas przy dluzszych sesjach.
+      let lastTickAt = Date.now();
+      let wasVisible = !document.hidden;
+
+      const runTick = async () => {
+        const now = Date.now();
+        const elapsed = Math.min(60, Math.max(0, Math.round((now - lastTickAt) / 1000)));
+        lastTickAt = now;
+
+        // Odcinek liczy sie, gdy karta byla widoczna przez caly czas od
+        // poprzedniego ticku, ochrona jest wlaczona i strona nie jest zaslonieta.
+        const counts = wasVisible && !document.hidden && !!currentSettings?.masterEnabled && !guardScreen;
+        wasVisible = !document.hidden;
+
+        const seconds = counts ? elapsed : 0;
+        const videos = unsavedVideos;
+        unsavedVideos = 0;
+        sessionSeconds += seconds;
+
+        // Dopisujemy do tego, co jest w storage, zamiast nadpisywac wlasna kopia:
+        // inaczej karta otwarta rano cofala licznik naliczony w innych kartach.
+        // Wolane takze z zerami, bo zwraca licznik nowego dnia po polnocy.
+        secondsToday = (await addToDailyStats(seconds, videos)).seconds;
+        evaluateGuard();
+      };
+
+      // Jeden zapis naraz: tick z zegara i tick ze zmiany widocznosci moga
+      // wypasc razem, a dwa rownolegle "odczytaj i dopisz" zgubilyby jeden z nich.
+      let tickQueue: Promise<void> = Promise.resolve();
+      const tick = (): Promise<void> => {
+        tickQueue = tickQueue.then(runTick, runTick);
+        return tickQueue;
+      };
+
+      window.setInterval(() => void tick(), 15000);
+
+      // Nasluch na `window` w fazie przechwycenia: skrypt "graj dalej w tle"
+      // zatrzymuje to zdarzenie na `document`, wiec nasluch tam by nie zadzialal.
+      window.addEventListener('visibilitychange', () => void tick(), true);
+
+      // bfcache: strona moze zostac przywrocona pozniej, a pagehide w oknie
+      // zamknietym nie zdazy zapisac sesji. Bez tego baner podsumowania ginal.
       window.addEventListener('pagehide', () => {
-        if (sessionSeconds >= SESSION_MIN_SECONDS || sessionVideos > 0) {
+        if (currentSettings?.masterEnabled && (sessionSeconds >= SESSION_MIN_SECONDS || sessionVideos > 0)) {
           const minutes = Math.max(sessionVideos > 0 ? 1 : 0, Math.round(sessionSeconds / 60));
           void saveLastSession({ endedAt: Date.now(), minutes, videos: sessionVideos });
         }
-        void flushStats(true);
+        void tick();
       });
     };
 
     const maybeShowSessionSummary = async (language: 'en' | 'pl') => {
+      // Wylaczona wtyczka nie powinna wstrzykiwac nic w strone.
+      if (currentSettings && !currentSettings.masterEnabled) return;
+
       try {
         if (sessionStorage.getItem(SUMMARY_SEEN_KEY)) return;
       } catch {
@@ -1126,6 +1221,8 @@ export default defineContentScript({
 
       const t = getT(language);
       const banner = document.createElement('div');
+      banner.id = SESSION_BANNER_ID;
+      banner.setAttribute(OWN_UI_ATTR, '1');
       banner.style.cssText =
         'position:fixed;top:14px;left:50%;transform:translateX(-50%);z-index:2147483647;' +
         'background:#161616;color:#fff;border:1px solid rgba(255,255,255,.14);border-radius:999px;' +
@@ -1137,6 +1234,7 @@ export default defineContentScript({
 
       const closeBtn = document.createElement('button');
       closeBtn.type = 'button';
+      closeBtn.setAttribute('aria-label', t.closeLabel);
       closeBtn.textContent = '\u00D7';
       closeBtn.style.cssText =
         'background:none;border:none;color:rgba(255,255,255,.6);font-size:16px;line-height:1;' +
@@ -1238,9 +1336,23 @@ export default defineContentScript({
       const t = getT(lang);
       const label = toggle.querySelector<HTMLElement>('[data-unhook-toggle-label]');
       const chevron = toggle.querySelector<HTMLElement>('[data-unhook-toggle-chevron]');
-      if (label) label.textContent = followingExpanded ? t.followingHide : t.followingViewAll;
-      if (chevron) chevron.style.transform = followingExpanded ? 'rotate(180deg)' : 'rotate(0deg)';
-      toggle.setAttribute('aria-expanded', followingExpanded ? 'true' : 'false');
+
+      // Kazdy zapis do DOM-u musi byc warunkowy. Bez tego `textContent = ...`
+      // podmienial wezel tekstowy, nawet gdy etykieta sie nie zmienila - czyli
+      // generowalismy mutacje DOM przy kazdym skanie, a obserwator mutacji
+      // budzil wlasnie ten skan. Petla feedback zjadajaca CPU na kazdej karcie.
+      const labelText = followingExpanded ? t.followingHide : t.followingViewAll;
+      if (label && label.textContent !== labelText) label.textContent = labelText;
+
+      const chevronTransform = followingExpanded ? 'rotate(180deg)' : 'rotate(0deg)';
+      if (chevron && chevron.style.transform !== chevronTransform) {
+        chevron.style.transform = chevronTransform;
+      }
+
+      const expanded = followingExpanded ? 'true' : 'false';
+      if (toggle.getAttribute('aria-expanded') !== expanded) {
+        toggle.setAttribute('aria-expanded', expanded);
+      }
     };
 
     const buildFollowingToggle = (): HTMLElement => {
@@ -1324,6 +1436,8 @@ export default defineContentScript({
         return;
       }
 
+      if (!document.body) return;
+
       const existing = document.querySelector<HTMLElement>(`[${FOLLOWING_BLOCK_ATTR}="1"]`);
       const toggle = document.getElementById(FOLLOWING_TOGGLE_ID);
       if (existing?.isConnected && toggle?.isConnected && toggle.parentElement === existing) {
@@ -1356,25 +1470,35 @@ export default defineContentScript({
     // --- Ukrywanie "Get Coins" / "Get App" po tresci przycisku ---
     // TikTok nie daje dla nich stabilnego data-e2e, wiec dopinamy marker,
     // a samo ukrycie robi CSS z generateStyles().
+    //
+    // WAZNE: tu sa WYLACZNIE wezwania do dzialania ("get coins", "kup monety").
+    // Swiadomie nie ma tu gołych rzeczownikow "coins" / "monety" - one trafialy
+    // w kazdy element, ktorego caly tekst brzmial tak samo, czyli niszczyly
+    // wskaznik salda, zakladke "Monety" w menu i zwykla nawigacje do sklepu.
+    // Niewykluczona reklama to drobnostka; ukryty portfel to zepsuta funkcja.
     const PROMO_LABELS = [
       'get coins',
       'get coin',
-      'coins',
       'get app',
       'get the app',
       'download app',
       'zdobadz monety',
       'kup monety',
-      'monety',
       'pobierz aplikacje',
       'pobierz apke',
       'doladuj monety',
       'zdobadz aplikacje',
       'zdobadz apke',
-      'zdobadz monety',
     ];
 
     const PROMO_CLICKABLE = 'a, button, [role="button"], [role="menuitem"]';
+
+    /**
+     * Surowa dlugosc tekstu, powyzej ktorej nie ma sensu w ogole normalizowac.
+     * Najdluzsza etykieta promocyjna to ~16 znakow; 40 zostawia zapas na
+     * polskie znaki diakrytyczne (rozkladane na znaki laczace) i whitespace.
+     */
+    const PROMO_MAX_RAW_LEN = 40;
 
     /** Miejsca, ktorych skan promocji nie moze dotknac (opisy filmow, komentarze). */
     const PROMO_SAFE_ZONES =
@@ -1395,13 +1519,19 @@ export default defineContentScript({
       document.querySelectorAll<HTMLElement>(PROMO_CLICKABLE).forEach((el) => {
         if (el.hasAttribute('data-unhook-promo')) return;
 
-        const label = normalizeLabel(el.textContent || '');
+        // normalizeLabel() to String.normalize('NFD') + trzy regexy - na dlugich
+        // opisach filmow to najdrozsza czesc tego skanu. Surowa dlugosc odrzuca
+        // kandydatow zanim w ogole zaczniemy normalizowac.
+        const raw = el.textContent || '';
+        if (!raw || raw.length > PROMO_MAX_RAW_LEN) return;
+
+        const label = normalizeLabel(raw);
         if (!label || label.length > 24) return;
         if (!PROMO_LABELS.includes(label)) return;
         if (el.closest(PROMO_SAFE_ZONES)) return;
 
         el.setAttribute('data-unhook-promo', '1');
-        console.log('[TikTok Unhook] Hidden promo item:', label);
+        console.log(LOG, 'Hidden promo item:', label);
       });
     };
 
@@ -1428,6 +1558,14 @@ export default defineContentScript({
     ]);
 
     const MAX_WRAPPER_DEPTH = 4;
+
+    /**
+     * Opakowania pochodzace z reguly oznaczonej jako `slow` (regula monet/apki).
+     * Szybkie przebiegi jej nie odpytuja, wiec musza dodac do `wanted` to, co
+     * ostatnio dopasowala - inaczej zostawiaja dziure w menu na czas do
+     * kolejnego wolnego przebiegu.
+     */
+    const slowRuleWrappers = new Set<Element>();
 
     const hasOwnText = (el: Element): boolean =>
       Array.from(el.childNodes).some(
@@ -1458,23 +1596,45 @@ export default defineContentScript({
      * Oznacza opakowania aktualnie ukrytych pozycji i - co wazne - zdejmuje
      * znaczniki z pozycji, ktore juz nie sa ukryte. Dzieki temu wylaczenie
      * suwaka od razu przywraca element, bez przeladowania strony.
+     *
+     * @param includeSlow uruchom takze kosztowne reguly legacy (patrz
+     *        `slow` w WrappedHideRule). Zmiana ustawien i nawigacja ida przez
+     *        `true`, zeby wszystko bylo natychmiastowe; cykliczne skany
+     *        odpalaja je raz na kilka sekund.
      */
-    const markHiddenWrappers = (settings: TikTokUnhookSettings) => {
+    const markHiddenWrappers = (settings: TikTokUnhookSettings, includeSlow: boolean) => {
       if (!document.body) return;
 
       const wanted = new Set<Element>();
-
-      if (settings.masterEnabled) {
-        for (const rule of WRAPPED_HIDE_RULES) {
-          if (!rule.isEnabled(settings)) continue;
-          let matches: NodeListOf<Element>;
-          try {
-            matches = document.querySelectorAll(rule.selector);
-          } catch {
-            continue;
-          }
-          matches.forEach((el) => wanted.add(soleWrapperOf(el)));
+      const collect = (selector: string, into: Set<Element>) => {
+        let matches: NodeListOf<Element>;
+        try {
+          matches = document.querySelectorAll(selector);
+        } catch {
+          return;
         }
+        matches.forEach((el) => into.add(soleWrapperOf(el)));
+      };
+
+      for (const rule of WRAPPED_HIDE_RULES) {
+        if (rule.slow) {
+          if (includeSlow) {
+            // Pelny przebieg reguly wolnej: cache od nowa, a przy wylaczonej
+            // regule (albo glownym wylaczniku) czysto.
+            slowRuleWrappers.clear();
+            if (settings.masterEnabled && rule.isEnabled(settings)) {
+              collect(rule.selector, slowRuleWrappers);
+            }
+          }
+          // Szybki przebieg NIE pyta o te regule, ale nie wolno mu tez zdjac tego,
+          // co ona ostatnio oznaczyła. Bez tego opakowanie reklamy gubiło
+          // atrybut i w pasku pojawiała się pusta dziura na czas do
+          // następnego wolnego przebiegu.
+          if (settings.masterEnabled) slowRuleWrappers.forEach((el) => wanted.add(el));
+          continue;
+        }
+        if (!settings.masterEnabled || !rule.isEnabled(settings)) continue;
+        collect(rule.selector, wanted);
       }
 
       document.querySelectorAll(`[${WRAPPER_HIDE_ATTR}]`).forEach((el) => {
@@ -1488,6 +1648,84 @@ export default defineContentScript({
       });
     };
 
+    /**
+     * Zdejmuje wszystkie wstrzykniete przez nas elementy UI. Wywolywane przy
+     * wylaczeniu glownego przełącznika - uzytkownik ma zobaczyc czysty TikTok.
+     */
+    const removeUnhookUi = () => {
+      [
+        SEARCH_TOAST_ID,
+        SEARCH_PILL_ID,
+        SEARCH_LOCK_OVERLAY_ID,
+        SEARCH_UNLOCK_MODAL_ID,
+        SESSION_BANNER_ID,
+        PASS_PILL_ID,
+      ].forEach((id) => document.getElementById(id)?.remove());
+
+      searchLockScreen = null;
+      stopSearchPill();
+      removePageToast(SEARCH_TOAST_ID);
+      removePageToast(PASS_TOAST_ID);
+      clearGuardScreen();
+      clearTextHiddenMarks();
+    };
+
+    /**
+     * Ciezskanie pracy: obserwator mutacji odpala skan nie rzadziej niz co
+     * 600 ms, ale czesc zadan nie musi chodzic z ta czestotliwoscia.
+     *
+     * - markHiddenWrappers: 7 selektorow na calym dokumencie (~9.5 ms przy
+     *   15k elementow). Reguly CSS z WRAPPED_HIDE_RULES ukrywaja same pozycje
+     *   juz na document_start, a ten krok dokladnie tylko zwija dziure w menu -
+     *   opoznienie 1.2 s jest niewidoczne.
+     * - markPromoElements: skan ~1150 klikalnych elementow; nowy przycisk
+     *   promocyjny pojawia sie raz na jakis czas, 1.2 s zwloki jest bez znaczenia.
+     */
+    const SLOW_SCAN_INTERVAL_MS = 1200;
+
+    /**
+     * Najdrozsza regula (atrybuty href z `*=`). W spokojnym DOM-ie ~2 ms,
+     * ale na aktywnej stronie 20-90 ms - przy ciagle mutowanym TikToku to
+     * byl glowny zlodziej czasu. 6 s wystarczy: lapie tylko stare uklady.
+     */
+    const SLOW_RULE_INTERVAL_MS = 6000;
+    const slowScanAt = new Map<string, number>();
+
+    const shouldRunSlowScan = (key: string, intervalMs = SLOW_SCAN_INTERVAL_MS): boolean => {
+      const now = Date.now();
+      const last = slowScanAt.get(key) ?? 0;
+      if (now - last < intervalMs) return false;
+      slowScanAt.set(key, now);
+      return true;
+    };
+
+    /** Czeka, az przestaniemy throttlowac dany skan (cos wlasnie sie zmienilo). */
+    const forceSlowScan = (key: string) => {
+      slowScanAt.set(key, 0);
+    };
+
+    /**
+     * Oznaczanie opakowan menu jest najdrozszym cyklicznym skanem, ale jego
+     * wynik zmienia sie wlasciwie tylko przy przerysowaniu lewego paska.
+     * Dlatego zwykle throttlujemy je do 2.5 s, a w chwili, gdy obserwator
+     * zobaczy mutacje wokol sidebara, odpalamy je natychmiast.
+     */
+    const WRAPPER_SCAN_INTERVAL_MS = 2500;
+    const SIDEBAR_MARKERS =
+      '[class*="DivSideNavContainer"], [class*="DivMainNavContainer"], ' +
+      '[class*="DivSideNavPlaceholderContainer"]';
+
+    const touchesSidebar = (mutations: MutationRecord[]): boolean => {
+      for (const m of mutations) {
+        if (m.target instanceof Element && m.target.closest(SIDEBAR_MARKERS)) return true;
+        for (const n of m.addedNodes) {
+          if (!(n instanceof Element)) continue;
+          if (n.matches(SIDEBAR_MARKERS) || n.closest(SIDEBAR_MARKERS)) return true;
+        }
+      }
+      return false;
+    };
+
     let scanTimer: number | null = null;
     const scheduleTextScan = () => {
       if (scanTimer !== null || !currentSettings) return;
@@ -1495,20 +1733,33 @@ export default defineContentScript({
         scanTimer = null;
         const s = currentSettings;
         if (!s) return;
+        // TikTok usuwa i wstawia cale sekcje przy nawigacji SPA; bez tego
+        // zabezpieczenia <style> mogl zniknac i style wrocily dopiero
+        // po nastepnym kliknieciu w popupie.
+        if (!document.getElementById(STYLE_ID)) {
+          applyCSS(s);
+          return;
+        }
         countActiveVideo();
         scanForTextDistractions(s);
         scanViralFilter(s);
         applyFollowingSectionCollapse(s);
-        markPromoElements(s);
+        if (shouldRunSlowScan('promo')) markPromoElements(s);
         // Po markPromoElements - "Zdobadz aplikacje" rozpoznajemy dopiero po tresci.
-        markHiddenWrappers(s);
-        handleSearchInterception(s);
+        if (shouldRunSlowScan('wrappers', WRAPPER_SCAN_INTERVAL_MS)) {
+          markHiddenWrappers(s, shouldRunSlowScan('wrappers-slow', SLOW_RULE_INTERVAL_MS));
+        }
+        // Szukajka zostaje na krotszym interwale niz menu - nowe pole
+        // wyszukiwania pojawia sie w reakcji na klikniecie uzytkownika
+        // i musi zablokowac sie, zanim zdazy w cos wpisac.
+        if (shouldRunSlowScan('search')) handleSearchInterception(s);
         handleSearchPageGuard(s);
       }, 600);
     };
 
     // 2. Wstrzykniecie CSS do DOM
     const applyCSS = (settings: TikTokUnhookSettings) => {
+      const wasEnabled = currentSettings ? currentSettings.masterEnabled : settings.masterEnabled;
       currentSettings = settings;
       writeKeepPlayingCache(settings.masterEnabled && settings.keepPlayingInBackground);
 
@@ -1530,12 +1781,22 @@ export default defineContentScript({
         document.documentElement.classList.remove('unhook-active', 'unhook-home-feed');
       }
 
+      // Przelaczenie glownego wylacznika musi natychmiast zdjac wszystko, co
+      // wstrzykneliismy - inaczej TikTok zostalby z naszymi elementami UI
+      // (pigułka odblokowania, banner sesji, nakladka blokady szukajki).
+      if (wasEnabled && !settings.masterEnabled) {
+        removeUnhookUi();
+      }
+
       applyFollowingSectionCollapse(settings);
       markPromoElements(settings);
-      markHiddenWrappers(settings);
+      // Ustawienia zmienil uzytkownik - wszystko musi zadzialac natychmiast,
+      // wiec i najwolniejsza regula leci w tym samym obrocie.
+      markHiddenWrappers(settings, true);
       handleAutoRedirect(settings);
       handleSearchInterception(settings);
       handleSearchPageGuard(settings);
+      evaluateGuard();
       scheduleTextScan();
     };
 
@@ -1544,8 +1805,6 @@ export default defineContentScript({
       applyCSS(settings);
       void maybeShowSessionSummary(settings.language);
       void startStatsTracking();
-      // Wyczysc cache obserwowanych z poprzednich wersji (funkcja juz nie istnieje).
-      void clearLegacyStorage();
     });
 
     onSettingsChange((newSettings) => {
@@ -1555,10 +1814,13 @@ export default defineContentScript({
     // 4. Detekcja zmiany trasy SPA (polling - izolowany swiat nie widzi pushState strony)
     const onLocationChange = () => {
       consecutiveSkips = 0;
+      // Nieuzywany odpytywacz profilu dotyczy starej sciezki.
+      if (profilePollId !== null) {
+        window.clearInterval(profilePollId);
+        profilePollId = null;
+      }
       if (currentSettings) {
         applyCSS(currentSettings);
-        handleSearchPageGuard(currentSettings);
-        handleSearchInterception(currentSettings);
       }
     };
 
@@ -1574,11 +1836,28 @@ export default defineContentScript({
     }, 300);
 
     // 5. Mutation Observer
-    const observer = new MutationObserver(() => {
-      if (!currentSettings) return;
-      if (!document.getElementById(STYLE_ID)) {
-        applyCSS(currentSettings);
-      }
+    // Obserwujemy `subtree`, bo TikTok przerysowuje cale sekcje w srodku drzewa.
+    // Koszt jest wciaz ograniczony: samo scheduleTextScan jest zdeduplikowane
+    // timerem 600ms, a skan dopiero wtedy robi kosztowne querySelectorAll.
+    const OWN_UI_SELECTOR = `[${OWN_UI_ATTR}]`;
+    const isOwnNode = (node: Node): boolean => node instanceof Element && node.hasAttribute(OWN_UI_ATTR);
+
+    /** Zmiana w calosci wewnatrz naszych elementow albo ich wpiecie/zdjecie. */
+    const isOwnMutation = (m: MutationRecord): boolean => {
+      if (m.target instanceof Element && m.target.closest(OWN_UI_SELECTOR)) return true;
+      if (m.addedNodes.length + m.removedNodes.length === 0) return false;
+      for (const node of m.addedNodes) if (!isOwnNode(node)) return false;
+      for (const node of m.removedNodes) if (!isOwnNode(node)) return false;
+      return true;
+    };
+
+    const observer = new MutationObserver((mutations) => {
+      // Odliczanie na naszej pigulce zmienia DOM co sekunde. Bez tego filtra
+      // kazda taka zmiana budzila pelny skan strony.
+      if (mutations.every(isOwnMutation)) return;
+      // Przerysowanie lewego pasku to jedyny moment, w ktorym wynik
+      // markHiddenWrappers realnie sie zmienia - wtedy nie czekamy na throttle.
+      if (touchesSidebar(mutations)) forceSlowScan('wrappers');
       scheduleTextScan();
     });
 

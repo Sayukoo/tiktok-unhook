@@ -19,9 +19,30 @@ const HIDE_HARD = `
 /** Atrybut, ktorym content script oznacza bezpieczne opakowanie ukrytej pozycji. */
 export const WRAPPER_HIDE_ATTR = 'data-unhook-hide';
 
+/** Reklama / sponsorowane - ukrywane przez content script po tresci etykiety. */
+export const AD_BLOCK_ATTR = 'data-unhook-adblock';
+
+/** Zakladka "You may like" na stronie filmu. */
+export const RECOMMEND_TAB_ATTR = 'data-unhook-recommend-tab';
+
+/**
+ * Selektor (nie lista nazw!) atrybutow ustawianych przez skan tresci.
+ * Musi zostac w nawiasach kwadratowych - samo `data-unhook-adblock` jest
+ * w CSS selektorem typu (nazwa tagu) i nigdy niczego nie znajdzie.
+ */
+export const TEXT_HIDE_ATTRS = `[${AD_BLOCK_ATTR}], [${RECOMMEND_TAB_ATTR}]`;
+
 export interface WrappedHideRule {
   selector: string;
   isEnabled: (s: TikTokUnhookSettings) => boolean;
+  /**
+   * Regula "wolna". Kosztuje najwiecej ze wszystkich - `a[href*="..."]` to
+   * atrybutowe wyszukiwanie substringow na calym dokumencie, a koszt dodatkowo
+   * skacze 5-15x, gdy strona jest aktywna (mutacje + rekalkulacja stylu).
+   * Lapie przy tym tylko starsze uklady TikToka, ktore nie zmieniaja sie
+   * co sekunde, wiec content script odpala je raz na kilka sekund.
+   */
+  slow?: boolean;
 }
 
 /**
@@ -61,6 +82,14 @@ export const WRAPPED_HIDE_RULES: WrappedHideRule[] = [
     isEnabled: (s) => s.hideShop,
   },
   {
+    // "Mini seriale" (short drama) - kolejny szarpacz w lewym menu. Pozycja ma
+    // swoj wlasny suwak tylko wylacznie w promo, wiec tutaj jest ukryta zawsze:
+    // isEnabled celowo nie patrzy na ustawienia, wystarczy glowny wylacznik,
+    // ktory i tak bramkuje oba miejsca generujace te reguly.
+    selector: '[data-e2e="nav-short-drama"], a[href="/shortdrama"], a[href^="/shortdrama?"]',
+    isEnabled: () => true,
+  },
+  {
     // "Zdobadz Monety" ma stabilne id/data-e2e, "Zdobadz aplikacje" juz nie -
     // ten drugi content script oznacza po tresci przycisku (data-unhook-promo).
     selector:
@@ -71,18 +100,37 @@ export const WRAPPED_HIDE_RULES: WrappedHideRule[] = [
       'a[href*="/mobile-app"], a[href*="tiktok.com/download"], ' +
       '[data-unhook-promo="1"]',
     isEnabled: (s) => s.hideGetCoinsApp || s.hideHeaderPromos,
+    // Jedyne `a[href*="..."]` w zestawie - patrz slow w WrappedHideRule.
+    slow: true,
   },
 ];
 
 /**
- * Generuje reguly CSS usuwajace rozpraszacze z TikToka.
+ * Regula ukrywajaca jeden typ licznika.
+ *
+ * `singular` to wariant uzywany przy filmie (`video-like-count`), `plural` -
+ * na profilu (`likes-count`). Musimy podac oba, bo selektor atrybutu
+ * kończący sie `$=` porównuje DOKŁADNIE zakończenie napisu.
+ */
+const countRule = (singular: string, plural: string): string =>
+  `[data-e2e$="${singular}"], [data-e2e$="${plural}"] { display: none !important; }`;
+
+/**
+ * Generuje reguly CSS usuwajace rozpraszacze ze strony.
  */
 export function generateStyles(settings: TikTokUnhookSettings): string {
   if (!settings.masterEnabled) {
-    return '/* TikTok Unhook: wylaczony */';
+    return '/* ochrona wylaczona */';
   }
 
   const rules: string[] = [];
+
+  // Skala szarości na elemencie głównym. Na `html` filtr nie tworzy nowego
+  // bloku zawierającego, więc elementy `position: fixed` strony zostają na
+  // swoich miejscach - na `body` rozjechałyby się paski i okna dialogowe.
+  if (settings.grayscale) {
+    rules.push('html { filter: grayscale(1) !important; }');
+  }
 
   // Animacja uzywana przez modale wstrzykiwane przez content script.
   rules.push(`
@@ -97,6 +145,22 @@ export function generateStyles(settings: TikTokUnhookSettings): string {
   rules.push(`
     [${WRAPPER_HIDE_ATTR}="1"] {
       ${HIDE_HARD}
+    }
+  `);
+
+  // 0b. CZERWONE KROPKI przy ikonkach lewego menu ("Wiecej", "Mini seriale").
+  //     TikTok wstawia kropke jako TUXAlertBadgeDot--* wewnatrz kontenera
+  //     TUXAlertBadgeDot-reference. Tego ostatniego NIE ruszamy - trzyma on
+  //     ikone SVG, a nie tylko kropke. DivRedDotContainer to starszy uklad.
+  //     Celowo wylacznie w pasku bocznym: kropek w topbarze nie tykamy.
+  rules.push(`
+    [class*="DivMainNavContainer"] [class*="TUXAlertBadgeDot--"],
+    [class*="DivSideNavContainer"] [class*="TUXAlertBadgeDot--"],
+    [class*="DivMainNavContainer"] [class*="DivRedDotContainer"],
+    [class*="DivSideNavContainer"] [class*="DivRedDotContainer"],
+    [data-e2e="nav-more-menu"] [class*="TUXAlertBadgeDot--"],
+    [data-e2e="nav-more-menu"] [class*="DivRedDotContainer"] {
+      display: none !important;
     }
   `);
 
@@ -155,14 +219,21 @@ export function generateStyles(settings: TikTokUnhookSettings): string {
   `);
 
   // 6. LICZNIKI (osobno per typ - nie ruszaja ikon ani profili)
+  //
+  //    TikTok uzywa DWÓCH postaci tych samych licznikow:
+  //      - przy filmie: data-e2e="video-like-count"  (pojedyncza)
+  //      - na profilu:  data-e2e="likes-count"      (liczba mnoga!)
+  //    Selektor `$="` dopasuje tylko dokladny koniec napisu, wiec wariant
+  //    bez "s" na profilu przechodzil obok - a opcja obiecuje usunac
+  //    "liczby serduszek i presje cyfr" w calym TikToku, nie tylko pod filmem.
   if (settings.hideLikeCount) {
-    rules.push(`[data-e2e$="like-count"] { display: none !important; }`);
+    rules.push(countRule('like-count', 'likes-count'));
   }
   if (settings.hideCommentCount) {
-    rules.push(`[data-e2e$="comment-count"] { display: none !important; }`);
+    rules.push(countRule('comment-count', 'comments-count'));
   }
   if (settings.hideShareCount) {
-    rules.push(`[data-e2e$="share-count"] { display: none !important; }`);
+    rules.push(countRule('share-count', 'shares-count'));
   }
   if (settings.hideLikeCount && settings.hideCommentCount && settings.hideShareCount) {
     rules.push(`
@@ -215,6 +286,16 @@ export function generateStyles(settings: TikTokUnhookSettings): string {
       [data-e2e="ad-badge"],
       [data-e2e="sponsored-badge"],
       [class*="DivAdvertiserContainer"] {
+        display: none !important;
+      }
+    `);
+    // Elementy rozpoznane po tresci (etykieta "Ad"/"Sponsored", zakladka
+    // "You may like"). Content script oznacza je atrybutem, a ukrycie robi
+    // ten CSS - dzieki temu wylaczenie opcji natychmiast je odslania,
+    // zamiast zostawiac display:none do przeladowania strony.
+    rules.push(`
+      [${AD_BLOCK_ATTR}="1"],
+      [${RECOMMEND_TAB_ATTR}="1"] {
         display: none !important;
       }
     `);
@@ -273,16 +354,27 @@ export function generateStyles(settings: TikTokUnhookSettings): string {
   }
 
   // 15. OPISY I DZWIEKI
+  //
+  //     Opcja dziala jak "ukryj, odslon przy najechaniu". Problem: na
+  //     ekranach dotykowych `:hover` NIGDY nie zachodzi - opis i dzwiek
+  //     zostalyby niewidoczne na zawsze, a uzytkownik nie ma czym kliknac,
+  //     zeby je odczytac. To opcja, ktora robi wiecej szkody niz pozytu.
+  //
+  //     Dlatego cale reguly siedza w "@media (hover: hover)". Tam, gdzie
+  //     odslanianie w ogole nie istnieje, opcja po prostu nie ingeruje
+  //     w strone - a dymk w popupie mowi wprost, kiedy tak jest.
   if (settings.hideDescriptions) {
     rules.push(`
-      [data-e2e="video-desc"],
-      [data-e2e="video-music"] {
-        opacity: 0 !important;
-        transition: opacity 0.15s ease !important;
-      }
-      [data-e2e="feed-video"]:hover [data-e2e="video-desc"],
-      [data-e2e="feed-video"]:hover [data-e2e="video-music"] {
-        opacity: 0.85 !important;
+      @media (hover: hover) {
+        [data-e2e="video-desc"],
+        [data-e2e="video-music"] {
+          opacity: 0 !important;
+          transition: opacity 0.15s ease !important;
+        }
+        [data-e2e="feed-video"]:hover [data-e2e="video-desc"],
+        [data-e2e="feed-video"]:hover [data-e2e="video-music"] {
+          opacity: 0.85 !important;
+        }
       }
     `);
   }

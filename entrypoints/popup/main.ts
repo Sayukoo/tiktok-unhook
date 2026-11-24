@@ -1,6 +1,22 @@
 import './style.css';
-import { getSettings, saveSettings, TikTokUnhookSettings, DEFAULT_SETTINGS } from '@/utils/storage';
+import {
+  getSettings,
+  saveSettings,
+  getGuardState,
+  updateGuardState,
+  onGuardChange,
+  getDailyStats,
+  onDailyStatsChange,
+  todayKey,
+  type GuardState,
+  type TikTokUnhookSettings,
+  DEFAULT_SETTINGS,
+} from '@/utils/storage';
 import { getT, Language } from '@/utils/i18n';
+import { pickDisarmText } from '@/utils/disarm';
+import { EDIT_WINDOW_MS, formatClock, isWeakening, ritualRounds } from '@/utils/guard';
+import { BRAND } from '@/utils/brand';
+import { closeDisarm, isDisarmOpen, mountDisarm, openDisarm, type DisarmMeta } from './disarm-view';
 
 // --- SVG ICON HELPERS (Zero innerHTML, 100% safe DOM creation) ---
 type SvgShape = {
@@ -63,38 +79,13 @@ function createSvg(shapes: SvgShape[], size = 15, strokeWidth = 2, viewBox = '0 
   return svg;
 }
 
+// Ten sam znak co w public/icon.svg: haczyk z oczkiem.
 function getAppLogo(): SVGSVGElement {
+  const volt = BRAND.colors.volt;
   const shapes: SvgShape[] = [
-    {
-      tag: 'path',
-      d: 'M72 34 V74 A16 16 0 1 1 56 58 A16 16 0 0 1 62 59.2 V47 A30 30 0 0 0 86 54 V40 A18 18 0 0 1 72 34 Z',
-      fill: '#FE2C55',
-      stroke: 'none',
-      transform: 'translate(2, 2)',
-    },
-    {
-      tag: 'path',
-      d: 'M72 34 V74 A16 16 0 1 1 56 58 A16 16 0 0 1 62 59.2 V47 A30 30 0 0 0 86 54 V40 A18 18 0 0 1 72 34 Z',
-      fill: '#25F4EE',
-      stroke: 'none',
-      transform: 'translate(-2, -2)',
-    },
-    {
-      tag: 'path',
-      d: 'M72 34 V74 A16 16 0 1 1 56 58 A16 16 0 0 1 62 59.2 V47 A30 30 0 0 0 86 54 V40 A18 18 0 0 1 72 34 Z',
-      fill: '#FFFFFF',
-      stroke: 'none',
-    },
-    {
-      tag: 'line',
-      x1: '30',
-      y1: '98',
-      x2: '98',
-      y2: '30',
-      stroke: '#FE2C55',
-      strokeWidth: '10',
-      strokeLinecap: 'round',
-    },
+    { tag: 'circle', cx: '76', cy: '30', r: '9', stroke: volt, strokeWidth: '9' },
+    { tag: 'path', d: 'M76 41 V78 a24 24 0 0 1 -48 0 V64', stroke: volt, strokeWidth: '13' },
+    { tag: 'path', d: 'M28 64 l13 13', stroke: volt, strokeWidth: '11' },
   ];
   return createSvg(shapes, 20, 2, '0 0 128 128');
 }
@@ -352,6 +343,60 @@ const icons = {
       ],
       12
     ),
+  lockKeyhole: () =>
+    createSvg(
+      [
+        { tag: 'circle', cx: '12', cy: '16', r: '1' },
+        { tag: 'rect', x: '3', y: '10', width: '18', height: '12', rx: '2' },
+        { tag: 'path', d: 'M7 10V7a5 5 0 0 1 10 0v3' },
+      ],
+      14
+    ),
+  hourglass: () =>
+    createSvg(
+      [
+        { tag: 'path', d: 'M5 22h14' },
+        { tag: 'path', d: 'M5 2h14' },
+        { tag: 'path', d: 'M17 22v-4.172a2 2 0 0 0-.586-1.414L12 12l-4.414 4.414A2 2 0 0 0 7 17.828V22' },
+        { tag: 'path', d: 'M7 2v4.172a2 2 0 0 0 .586 1.414L12 12l4.414-4.414A2 2 0 0 0 17 6.172V2' },
+      ],
+      14
+    ),
+  timer: () =>
+    createSvg(
+      [
+        { tag: 'line', x1: '10', y1: '2', x2: '14', y2: '2' },
+        { tag: 'line', x1: '12', y1: '14', x2: '15', y2: '11' },
+        { tag: 'circle', cx: '12', cy: '14', r: '8' },
+      ],
+      14
+    ),
+  contrast: () =>
+    createSvg(
+      [
+        { tag: 'circle', cx: '12', cy: '12', r: '10' },
+        { tag: 'path', d: 'M12 18a6 6 0 0 0 0-12v12z' },
+      ],
+      14
+    ),
+  heart: () =>
+    createSvg(
+      [
+        {
+          tag: 'path',
+          d: 'M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z',
+        },
+      ],
+      14
+    ),
+  clock: () =>
+    createSvg(
+      [
+        { tag: 'circle', cx: '12', cy: '12', r: '10' },
+        { tag: 'polyline', points: '12 6 12 12 16 14' },
+      ],
+      12
+    ),
 };
 
 // --- APP STATE & UI CREATION ---
@@ -397,9 +442,76 @@ function showToast(msg: string) {
   }, 2500);
 }
 
-function updateSettings(newSettings: Partial<TikTokUnhookSettings>) {
-  currentSettings = { ...currentSettings, ...newSettings };
-  saveSettings(currentSettings);
+// --- ZAMEK ---
+let guard: GuardState = { editUntil: 0, ritualCount: 0, passUntil: 0, passCount: 0 };
+let usageSeconds = 0;
+let pendingPatch: Partial<TikTokUnhookSettings> | null = null;
+let pendingKind: DisarmMeta['kind'] | null = null;
+let editTickId: number | null = null;
+
+function isEditWindowOpen(): boolean {
+  return guard.editUntil > Date.now();
+}
+
+/**
+ * Czy zmiana wymaga rytuału. Wyłączenie całości wymaga go zawsze; pojedyncze
+ * poluzowania tylko przy włączonym zamku. Po ukończonym rytuale okno edycji
+ * zwalnia z obu na kilka minut, żeby nie przepisywać zdania dla każdego suwaka.
+ */
+function ritualFor(next: TikTokUnhookSettings): DisarmMeta['kind'] | null {
+  if (!currentSettings.masterEnabled || isEditWindowOpen()) return null;
+  if (!next.masterEnabled) return 'off';
+  if (currentSettings.strictLock && isWeakening(currentSettings, next)) return 'loosen';
+  return null;
+}
+
+function commitSettings(next: TikTokUnhookSettings) {
+  currentSettings = next;
+  void saveSettings(currentSettings);
+  render();
+}
+
+function updateSettings(patch: Partial<TikTokUnhookSettings>, toast?: string) {
+  const next = { ...currentSettings, ...patch };
+  const kind = ritualFor(next);
+  if (kind) {
+    pendingPatch = patch;
+    pendingKind = kind;
+    const rounds = ritualRounds(guard.ritualCount);
+    const t = getT(currentSettings.language || 'en');
+    openDisarm(pickDisarmText(t.disarmPhrases, rounds), { kind, rounds });
+    render();
+    return;
+  }
+  commitSettings(next);
+  if (toast) showToast(toast);
+}
+
+function cancelRitual() {
+  pendingPatch = null;
+  pendingKind = null;
+  closeDisarm();
+  render();
+}
+
+function completeRitual() {
+  const patch = pendingPatch;
+  const kind = pendingKind;
+  pendingPatch = null;
+  pendingKind = null;
+  closeDisarm();
+
+  guard = { ...guard, ritualCount: guard.ritualCount + 1, editUntil: Date.now() + EDIT_WINDOW_MS };
+  void updateGuardState({ ritualCount: guard.ritualCount, editUntil: guard.editUntil });
+
+  const t = getT(currentSettings.language || 'en');
+  commitSettings({ ...currentSettings, ...(patch ?? {}) });
+  showToast(kind === 'off' ? t.extensionDisabled : t.editWindowToast);
+}
+
+function lockNow() {
+  guard = { ...guard, editUntil: 0 };
+  void updateGuardState({ editUntil: 0 });
   render();
 }
 
@@ -500,14 +612,14 @@ window.addEventListener('scroll', hideFloatingTooltip, true);
 document.addEventListener('click', hideFloatingTooltip);
 
 // --- WSPOLNE KLASY ---
-const ACCENT_TEXT = 'text-[#007aff] dark:text-[#25f4ee]';
+const ACCENT_TEXT = 'text-[#4d7c0f] dark:text-[#d4ff3a]';
 const FOCUS_RING =
-  'focus:outline-none focus-visible:ring-2 focus-visible:ring-[#007aff]/60 dark:focus-visible:ring-[#25f4ee]/60 focus-visible:ring-offset-1 focus-visible:ring-offset-white dark:focus-visible:ring-offset-[#141416]';
+  'focus:outline-none focus-visible:ring-2 focus-visible:ring-[#4d7c0f]/60 dark:focus-visible:ring-[#d4ff3a]/60 focus-visible:ring-offset-1 focus-visible:ring-offset-white dark:focus-visible:ring-offset-[#141416]';
 
 function createSwitch(checked: boolean): HTMLElement {
   const track = document.createElement('span');
   track.className = `relative inline-flex h-5 w-9 flex-shrink-0 items-center rounded-full border-2 border-transparent transition-colors duration-200 ease-out pointer-events-none ${
-    checked ? 'bg-[#007aff] dark:bg-[#25f4ee]' : 'bg-gray-300 dark:bg-white/15'
+    checked ? 'bg-[#4d7c0f] dark:bg-[#d4ff3a]' : 'bg-gray-300 dark:bg-white/15'
   }`;
 
   const thumb = document.createElement('span');
@@ -548,7 +660,6 @@ function createToggleRow(
   }`;
 
   if (!disabled) btn.onclick = onToggle;
-  attachTooltip(btn, title, desc);
 
   const iconWrap = document.createElement('span');
   iconWrap.className = `flex items-center justify-center flex-shrink-0 w-4 h-4 transition-colors ${
@@ -557,7 +668,9 @@ function createToggleRow(
   iconWrap.appendChild(iconEl);
 
   const titleEl = document.createElement('span');
-  titleEl.className = `flex-1 min-w-0 truncate text-[12.5px] font-medium leading-none ${
+  // leading-tight, nie leading-none: przy zerowej interlinii `truncate` obcinał
+  // dolne części liter g, y, p.
+  titleEl.className = `flex-1 min-w-0 truncate text-[12.5px] font-medium leading-tight ${
     checked ? 'text-gray-900 dark:text-gray-100' : 'text-gray-500 dark:text-gray-400'
   }`;
   titleEl.textContent = title;
@@ -566,14 +679,18 @@ function createToggleRow(
   btn.appendChild(titleEl);
   btn.appendChild(createSwitch(checked));
 
+  // Po dodaniu tytułu: attachTooltip nadaje aria-label tylko elementom bez
+  // tekstu. Wywołany wcześniej podmieniał nazwę przełącznika na jego opis.
+  attachTooltip(btn, title, desc);
+
   return btn;
 }
 
 // --- ACCORDION ---
-const ALL_CLUSTER_IDS = ['feeds', 'content', 'following', 'ads'];
-let openClusters: Set<string> = new Set(['feeds', 'following']);
+const ALL_CLUSTER_IDS = ['limits', 'feeds', 'content', 'following', 'ads'];
+let openClusters: Set<string> = new Set(['limits', 'feeds']);
 try {
-  const savedClusters = localStorage.getItem('unhook_open_clusters_v2');
+  const savedClusters = localStorage.getItem('unhook_open_clusters_v3');
   if (savedClusters) openClusters = new Set(JSON.parse(savedClusters));
 } catch {
   /* noop */
@@ -581,7 +698,7 @@ try {
 
 function saveOpenClusters(set: Set<string>) {
   try {
-    localStorage.setItem('unhook_open_clusters_v2', JSON.stringify(Array.from(set)));
+    localStorage.setItem('unhook_open_clusters_v3', JSON.stringify(Array.from(set)));
   } catch {
     /* noop */
   }
@@ -630,11 +747,10 @@ function createAccordionCluster(
   const badge = document.createElement('span');
   badge.className = `text-[9.5px] leading-none px-1.5 py-[3px] rounded-full font-semibold tabular-nums transition-colors ${
     activeCount > 0
-      ? `bg-[#007aff]/10 dark:bg-[#25f4ee]/10 ${ACCENT_TEXT}`
+      ? `bg-[#4d7c0f]/10 dark:bg-[#d4ff3a]/10 ${ACCENT_TEXT}`
       : 'bg-gray-100 text-gray-400 dark:bg-white/[0.06] dark:text-gray-500'
   }`;
   badge.textContent = `${activeCount}/${totalCount}`;
-  badge.title = t.activeItemsCount(activeCount, totalCount);
 
   const chevron = icons.chevronDown(isOpen);
   chevron.classList.add(
@@ -650,6 +766,9 @@ function createAccordionCluster(
 
   headerBtn.appendChild(left);
   headerBtn.appendChild(right);
+  // Wlasny dymek zamiast natywnego `title` - natywne dymekki nakladaly sie
+  // na tooltip i dublowaly informacje o liczniku aktywnych pozycji.
+  attachTooltip(headerBtn, title, t.activeItemsCount(activeCount, totalCount));
   section.appendChild(headerBtn);
 
   if (isOpen) {
@@ -668,8 +787,14 @@ function createStepperRow(
   value: number,
   min: number,
   step: number | ((v: number) => number),
-  apply: (next: number) => void
+  apply: (next: number) => void,
+  options: { max?: number; format?: (v: number) => string; wrap?: number } = {}
 ): HTMLElement {
+  // `wrap` to zegar: 23:30 + 30 min daje 00:00 zamiast zatrzymać się na końcu.
+  const move = (delta: number): number => {
+    if (options.wrap) return (((value + delta) % options.wrap) + options.wrap) % options.wrap;
+    return Math.min(options.max ?? Number.MAX_SAFE_INTEGER, Math.max(min, value + delta));
+  };
   const row = document.createElement('div');
   row.className = 'flex items-center justify-between gap-2 py-0.5';
 
@@ -688,19 +813,19 @@ function createStepperRow(
   minus.textContent = '−';
   minus.setAttribute('aria-label', `${label} -`);
   minus.className = btnCls;
-  minus.onclick = () => apply(Math.max(min, value - stepFor(value)));
+  minus.onclick = () => apply(move(-stepFor(value)));
 
   const valSpan = document.createElement('span');
   valSpan.className =
     'text-[11px] font-semibold text-gray-800 dark:text-gray-100 min-w-[46px] text-center tabular-nums';
-  valSpan.textContent = value.toLocaleString();
+  valSpan.textContent = options.format ? options.format(value) : value.toLocaleString();
 
   const plus = document.createElement('button');
   plus.type = 'button';
   plus.textContent = '+';
   plus.setAttribute('aria-label', `${label} +`);
   plus.className = btnCls;
-  plus.onclick = () => apply(value + stepFor(value));
+  plus.onclick = () => apply(move(stepFor(value)));
 
   controls.appendChild(minus);
   controls.appendChild(valSpan);
@@ -709,6 +834,14 @@ function createStepperRow(
   row.appendChild(lab);
   row.appendChild(controls);
   return row;
+}
+
+function isDonateConfigured(url: string): boolean {
+  try {
+    return new URL(url).pathname.replace(/\/+$/, '').length > 0;
+  } catch {
+    return false;
+  }
 }
 
 function createHeaderButton(
@@ -736,6 +869,23 @@ function render() {
   const previousMain = root.querySelector('main');
   if (previousMain) savedScrollTop = previousMain.scrollTop;
 
+  if (editTickId !== null) {
+    window.clearInterval(editTickId);
+    editTickId = null;
+  }
+
+  if (isDisarmOpen()) {
+    const lang: Language = currentSettings.language || 'en';
+    mountDisarm(root, {
+      isDark: currentSettings.theme === 'dark',
+      t: getT(lang),
+      onCancel: cancelRitual,
+      onConfirm: completeRitual,
+      requestRender: () => render(),
+    });
+    return;
+  }
+
   const isDark = currentSettings.theme === 'dark';
   const isMasterOn = currentSettings.masterEnabled;
   const lang: Language = currentSettings.language || 'en';
@@ -759,7 +909,7 @@ function render() {
 
   const logoWrap = document.createElement('div');
   logoWrap.className =
-    'w-7 h-7 rounded-lg bg-[#121212] flex items-center justify-center shadow-sm overflow-hidden flex-shrink-0';
+    'w-7 h-7 rounded-lg bg-[#0e0f13] flex items-center justify-center shadow-sm overflow-hidden flex-shrink-0';
   logoWrap.appendChild(getAppLogo());
 
   const titlesWrap = document.createElement('div');
@@ -787,20 +937,22 @@ function render() {
     t.creatorPresetTitle,
     t.creatorPresetAction,
     () => {
-      updateSettings({
-        ...DEFAULT_SETTINGS,
-        language: currentSettings.language,
-        theme: currentSettings.theme,
-      });
-      showToast(t.creatorPresetToast);
+      updateSettings(
+        {
+          ...DEFAULT_SETTINGS,
+          language: currentSettings.language,
+          theme: currentSettings.theme,
+        },
+        t.creatorPresetToast
+      );
     },
-    'text-gray-400 hover:text-[#007aff] dark:hover:text-[#25f4ee] hover:bg-gray-200/60 dark:hover:bg-white/[0.08]'
+    'text-gray-400 hover:text-[#4d7c0f] dark:hover:text-[#d4ff3a] hover:bg-gray-200/60 dark:hover:bg-white/[0.08]'
   );
 
   const langInner = document.createElement('span');
   langInner.className = 'flex items-center gap-1';
   const langIcon = icons.languages();
-  langIcon.classList.add('text-[#007aff]', 'dark:text-[#25f4ee]');
+  langIcon.classList.add('text-[#4d7c0f]', 'dark:text-[#d4ff3a]');
   const langText = document.createElement('span');
   langText.className = 'tracking-wide uppercase text-[10.5px] font-bold';
   langText.textContent = lang;
@@ -809,8 +961,8 @@ function render() {
 
   const langBtn = createHeaderButton(
     langInner,
-    'Language / Jezyk',
-    lang === 'pl' ? 'Switch to English (EN)' : 'Przelacz na polski (PL)',
+    t.langSwitchTitle,
+    lang === 'pl' ? t.langSwitchToEn : t.langSwitchToPl,
     () => {
       const nextLang: Language = lang === 'en' ? 'pl' : 'en';
       updateSettings({ language: nextLang });
@@ -830,14 +982,15 @@ function render() {
   const powerBtn = createHeaderButton(
     icons.power(isMasterOn),
     isMasterOn ? t.toggleMasterOff : t.toggleMasterOn,
-    undefined,
+    isMasterOn && !isEditWindowOpen() ? t.disarmPowerHint : undefined,
     () => {
-      const next = !isMasterOn;
-      updateSettings({ masterEnabled: next });
-      showToast(next ? t.extensionEnabled : t.extensionDisabled);
+      // Wyłączenie przechodzi przez updateSettings, a ono samo decyduje,
+      // czy najpierw trzeba przepisać zdanie.
+      if (isMasterOn) updateSettings({ masterEnabled: false }, t.extensionDisabled);
+      else updateSettings({ masterEnabled: true }, t.extensionEnabled);
     },
     isMasterOn
-      ? 'text-[#007aff] dark:text-[#25f4ee] bg-[#007aff]/10 dark:bg-[#25f4ee]/10 hover:bg-[#007aff]/20 dark:hover:bg-[#25f4ee]/20'
+      ? 'text-[#4d7c0f] dark:text-[#d4ff3a] bg-[#4d7c0f]/10 dark:bg-[#d4ff3a]/10 hover:bg-[#4d7c0f]/20 dark:hover:bg-[#d4ff3a]/20'
       : 'text-gray-400 hover:bg-gray-200/60 dark:hover:bg-white/[0.08]'
   );
 
@@ -906,13 +1059,62 @@ function render() {
   progressTrack.className = 'h-1 w-full rounded-full bg-gray-200 dark:bg-white/[0.08] overflow-hidden';
   const progressFill = document.createElement('div');
   progressFill.className = `h-full rounded-full transition-[width] duration-300 ease-out ${
-    isMasterOn ? 'bg-[#007aff] dark:bg-[#25f4ee]' : 'bg-amber-400'
+    isMasterOn ? 'bg-[#4d7c0f] dark:bg-[#d4ff3a]' : 'bg-amber-400'
   }`;
   progressFill.style.width = '0%';
   progressTrack.appendChild(progressFill);
 
+  // Drugi wiersz: dzisiejszy czas na stronie i, po rytuale, licznik okna edycji.
+  const usageRow = document.createElement('div');
+  usageRow.className = 'flex items-center justify-between gap-2 min-h-[18px]';
+
+  const usageMinutes = Math.floor(usageSeconds / 60);
+  const overLimit =
+    currentSettings.dailyLimitEnabled && usageMinutes >= currentSettings.dailyLimitMinutes;
+  const usageEl = document.createElement('span');
+  usageEl.className = `flex items-center gap-1 text-[10.5px] tabular-nums ${
+    overLimit && isMasterOn ? 'text-amber-600 dark:text-amber-400 font-semibold' : 'text-gray-500 dark:text-gray-400'
+  }`;
+  usageEl.appendChild(icons.clock());
+  const usageText = document.createElement('span');
+  usageText.textContent = currentSettings.dailyLimitEnabled
+    ? t.usageTodayOfLimit(usageMinutes, currentSettings.dailyLimitMinutes)
+    : t.usageToday(usageMinutes);
+  usageEl.appendChild(usageText);
+  usageRow.appendChild(usageEl);
+
+  if (isEditWindowOpen()) {
+    const chip = document.createElement('span');
+    chip.className = `flex items-center gap-1.5 text-[10.5px] font-semibold ${ACCENT_TEXT}`;
+
+    const chipText = document.createElement('span');
+    chipText.className = 'tabular-nums';
+    const paintChip = () => {
+      const left = Math.max(0, Math.ceil((guard.editUntil - Date.now()) / 1000));
+      chipText.textContent = t.editWindowOpen(Math.floor(left / 60), left % 60);
+    };
+    paintChip();
+    if (guard.editUntil - Date.now() > EDIT_WINDOW_MS) attachTooltip(chipText, t.setupWindowHint);
+
+    const lockBtn = document.createElement('button');
+    lockBtn.type = 'button';
+    lockBtn.className = `underline underline-offset-2 cursor-pointer rounded ${FOCUS_RING}`;
+    lockBtn.textContent = t.editWindowLockNow;
+    lockBtn.onclick = lockNow;
+
+    chip.appendChild(chipText);
+    chip.appendChild(lockBtn);
+    usageRow.appendChild(chip);
+
+    editTickId = window.setInterval(() => {
+      if (isEditWindowOpen()) paintChip();
+      else render();
+    }, 1000);
+  }
+
   statusBar.appendChild(statusTop);
   statusBar.appendChild(progressTrack);
+  statusBar.appendChild(usageRow);
 
   // --- KLASTRY ---
   const main = document.createElement('main');
@@ -962,6 +1164,123 @@ function render() {
       )
     );
   };
+
+  // 0. LIMITY I ZAMEK
+  const stepperBoxClass =
+    'ml-[34px] mr-2 mb-1 px-2 py-1 rounded-lg bg-gray-50 dark:bg-white/[0.03] border border-gray-200/70 dark:border-white/[0.06]';
+  const withStepper = (...rows: HTMLElement[]): HTMLElement => {
+    const box = document.createElement('div');
+    box.className = stepperBoxClass;
+    rows.forEach((row) => box.appendChild(row));
+    return box;
+  };
+
+  const limitItems: HTMLElement[] = [
+    createToggleRow(
+      icons.lockKeyhole(),
+      t.strictLockTitle,
+      t.strictLockDesc,
+      currentSettings.strictLock,
+      () => updateSettings({ strictLock: !currentSettings.strictLock }),
+      !isMasterOn
+    ),
+    createToggleRow(
+      icons.hourglass(),
+      t.entryGateTitle,
+      t.entryGateDesc,
+      currentSettings.entryGateEnabled,
+      () => updateSettings({ entryGateEnabled: !currentSettings.entryGateEnabled }),
+      !isMasterOn
+    ),
+  ];
+  if (isMasterOn && currentSettings.entryGateEnabled) {
+    limitItems.push(
+      withStepper(
+        createStepperRow(
+          t.entryGateSecondsLabel,
+          currentSettings.entryGateSeconds,
+          5,
+          5,
+          (v) => updateSettings({ entryGateSeconds: v }),
+          { max: 60 }
+        )
+      )
+    );
+  }
+  limitItems.push(
+    createToggleRow(
+      icons.timer(),
+      t.dailyLimitTitle,
+      t.dailyLimitDesc,
+      currentSettings.dailyLimitEnabled,
+      () => updateSettings({ dailyLimitEnabled: !currentSettings.dailyLimitEnabled }),
+      !isMasterOn
+    )
+  );
+  if (isMasterOn && currentSettings.dailyLimitEnabled) {
+    limitItems.push(
+      withStepper(
+        createStepperRow(
+          t.dailyLimitMinutesLabel,
+          currentSettings.dailyLimitMinutes,
+          5,
+          (v) => (v >= 60 ? 15 : 5),
+          (v) => updateSettings({ dailyLimitMinutes: v }),
+          { max: 600 }
+        )
+      )
+    );
+  }
+  limitItems.push(
+    createToggleRow(
+      icons.moon(),
+      t.quietHoursTitle,
+      t.quietHoursDesc,
+      currentSettings.quietHoursEnabled,
+      () => updateSettings({ quietHoursEnabled: !currentSettings.quietHoursEnabled }),
+      !isMasterOn
+    )
+  );
+  if (isMasterOn && currentSettings.quietHoursEnabled) {
+    const clockOptions = { wrap: 24 * 60, format: formatClock };
+    limitItems.push(
+      withStepper(
+        createStepperRow(
+          t.quietFromLabel,
+          currentSettings.quietStart,
+          0,
+          30,
+          (v) => updateSettings({ quietStart: v }),
+          clockOptions
+        ),
+        createStepperRow(
+          t.quietToLabel,
+          currentSettings.quietEnd,
+          0,
+          30,
+          (v) => updateSettings({ quietEnd: v }),
+          clockOptions
+        )
+      )
+    );
+  }
+  limitItems.push(
+    createToggleRow(
+      icons.contrast(),
+      t.grayscaleTitle,
+      t.grayscaleDesc,
+      currentSettings.grayscale,
+      () => updateSettings({ grayscale: !currentSettings.grayscale }),
+      !isMasterOn
+    )
+  );
+  const limitActive =
+    (currentSettings.strictLock ? 1 : 0) +
+    (currentSettings.entryGateEnabled ? 1 : 0) +
+    (currentSettings.dailyLimitEnabled ? 1 : 0) +
+    (currentSettings.quietHoursEnabled ? 1 : 0) +
+    (currentSettings.grayscale ? 1 : 0);
+  addCluster('limits', icons.lockKeyhole(), t.clusterLimits, limitActive, 5, limitItems);
 
   // 1. FOKUS & NAWIGACJA
   const feedItems: HTMLElement[] = [
@@ -1045,6 +1364,14 @@ function render() {
       !isMasterOn
     ),
     createToggleRow(
+      icons.heart(),
+      t.hideActionsTitle,
+      t.hideActionsDesc,
+      currentSettings.hideActionButtons,
+      () => updateSettings({ hideActionButtons: !currentSettings.hideActionButtons }),
+      !isMasterOn
+    ),
+    createToggleRow(
       icons.fileText(),
       t.hideDescriptionsTitle,
       t.hideDescriptionsDesc,
@@ -1056,8 +1383,9 @@ function render() {
   const contentActive =
     (currentSettings.hideComments ? 1 : 0) +
     (currentSettings.hideLikeCount ? 1 : 0) +
+    (currentSettings.hideActionButtons ? 1 : 0) +
     (currentSettings.hideDescriptions ? 1 : 0);
-  addCluster('content', icons.messageSquare(), t.clusterContent, contentActive, 3, contentItems);
+  addCluster('content', icons.messageSquare(), t.clusterContent, contentActive, 4, contentItems);
 
   // 3. TWORCY & OBSERWOWANI
   const likeStep = (v: number) => (v >= 20000 ? 10000 : v >= 5000 ? 2500 : v >= 1000 ? 500 : 100);
@@ -1074,7 +1402,7 @@ function render() {
     createToggleRow(
       icons.flame(),
       t.viralFilterTitle,
-      t.viralFilterDesc(currentSettings.viralMinLikes),
+      t.viralFilterDesc(currentSettings.viralMinLikes, currentSettings.viralMinComments),
       currentSettings.viralFilterEnabled,
       () => updateSettings({ viralFilterEnabled: !currentSettings.viralFilterEnabled }),
       !isMasterOn
@@ -1153,10 +1481,7 @@ function render() {
       t.hideLiveTitle,
       t.hideLiveDesc,
       currentSettings.hideLiveSidebar,
-      () => {
-        const next = !currentSettings.hideLiveSidebar;
-        updateSettings({ hideLiveSidebar: next, hideLiveChat: next });
-      },
+      () => updateSettings({ hideLiveSidebar: !currentSettings.hideLiveSidebar }),
       !isMasterOn
     ),
     createToggleRow(
@@ -1210,7 +1535,11 @@ function render() {
   versionEl.className = 'text-[9.5px] text-gray-400 dark:text-gray-600 tabular-nums flex-shrink-0';
   versionEl.textContent = getExtensionVersion();
 
-  footer.appendChild(donateBtn);
+  // Link pokazujemy dopiero, gdy `donateUrl` w utils/i18n.ts prowadzi do
+  // konkretnego profilu. Sam adres serwisu ("https://buymeacoffee.com")
+  // otwierał cudzą stronę główną, na której nie da się nikogo wesprzeć.
+  if (isDonateConfigured(t.donateUrl)) footer.appendChild(donateBtn);
+  else footer.appendChild(document.createElement('span'));
   footer.appendChild(versionEl);
 
   container.appendChild(header);
@@ -1229,7 +1558,23 @@ function render() {
 }
 
 // Initial start
-getSettings().then((data) => {
+Promise.all([getSettings(), getGuardState(), getDailyStats()]).then(([data, guardState, stats]) => {
   if (data) currentSettings = data;
+  guard = guardState;
+  usageSeconds = stats && stats.date === todayKey() ? stats.seconds : 0;
   render();
+});
+
+// Rytuału nie przerysowujemy z zewnątrz: render() zbudowałby go od nowa
+// i skasował to, co użytkownik zdążył przepisać.
+onGuardChange((state) => {
+  guard = state;
+  if (!isDisarmOpen()) render();
+});
+
+onDailyStatsChange((stats) => {
+  const next = stats && stats.date === todayKey() ? stats.seconds : 0;
+  const minuteChanged = Math.floor(next / 60) !== Math.floor(usageSeconds / 60);
+  usageSeconds = next;
+  if (minuteChanged && !isDisarmOpen()) render();
 });

@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Short video feed (illustrative mock)</title>
+    <!--
+      Makieta ogólnej strony z krótkimi filmami. Używana do testów content
+      scriptu i do grafik promocyjnych, żeby nie pokazywać cudzego interfejsu.
+      Atrybuty data-e2e i fragmenty nazw klas odpowiadają temu, czego szuka
+      utils/selectors.ts, więc elementy chowa prawdziwy kod rozszerzenia.
+    -->
+    <!--HARNESS-->
+    <style>
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; }
+      body {
+        background: #17141f;
+        color: #f2eefc;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+        font-size: 14px;
+        overflow: hidden;
+      }
+      a { color: inherit; text-decoration: none; }
+      button { font: inherit; color: inherit; cursor: pointer; }
+      .app { display: grid; grid-template-columns: 248px 1fr 340px; height: 100vh; }
+
+      .side { border-right: 1px solid #2a2536; padding: 16px 12px; overflow: hidden; display: flex; flex-direction: column; gap: 12px; }
+      .brand { display: flex; align-items: center; gap: 9px; font-weight: 800; font-size: 18px; letter-spacing: -0.02em; padding: 2px 8px 6px; }
+      .brand i { width: 26px; height: 26px; border-radius: 8px; background: linear-gradient(135deg, #ff8a3d, #c14dff); display: block; }
+      .search input {
+        width: 100%; height: 38px; border-radius: 999px; border: 1px solid #332d42; background: #211c2c;
+        color: #fff; padding: 0 16px; font-size: 13px; outline: none;
+      }
+      .nav ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+      .nav a { display: flex; align-items: center; gap: 12px; padding: 9px 10px; border-radius: 10px; font-weight: 600; font-size: 15px; position: relative; }
+      .nav a:hover { background: #241f30; }
+      .nav a .ic { width: 22px; height: 22px; border-radius: 7px; background: #3a3350; flex-shrink: 0; }
+      .nav a.hot .ic { background: linear-gradient(135deg, #ff8a3d, #ff4d8d); }
+      .nav a .dot { position: absolute; left: 26px; top: 7px; width: 9px; height: 9px; border-radius: 50%; background: #ff4d6d; border: 2px solid #17141f; }
+      .nav a .tag { margin-left: auto; font-size: 10px; font-weight: 800; padding: 2px 7px; border-radius: 999px; background: #ff4d6d; color: #fff; }
+      .block h4 { margin: 0 0 6px; padding: 0 10px; font-size: 12px; font-weight: 600; color: #9d95b3; }
+      .acct { display: flex; align-items: center; gap: 10px; padding: 6px 10px; border-radius: 10px; font-size: 13px; font-weight: 600; }
+      .acct i { width: 28px; height: 28px; border-radius: 50%; flex-shrink: 0; display: block; }
+      .acct small { display: block; font-weight: 400; color: #9d95b3; font-size: 11px; }
+      .promo-btn { margin: 0 8px; height: 36px; border-radius: 10px; border: 0; background: linear-gradient(90deg, #ff8a3d, #ff4d8d); font-weight: 700; font-size: 13px; color: #fff; }
+      .ad { margin: 0 8px; padding: 10px 12px; border-radius: 12px; background: #2a2114; border: 1px solid #5a4418; font-size: 12.5px; font-weight: 600; line-height: 1.35; }
+      .ad span { display: block; font-size: 10px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; color: #ffc83d; margin-bottom: 3px; }
+      .foot { margin-top: auto; padding: 0 10px; font-size: 11px; color: #6f6885; line-height: 1.6; }
+
+      .main { position: relative; display: flex; align-items: center; justify-content: center; gap: 18px; padding: 18px; min-width: 0; }
+      .top { position: absolute; top: 14px; right: 18px; display: flex; gap: 10px; align-items: center; }
+      .top button { height: 34px; padding: 0 14px; border-radius: 999px; border: 1px solid #3a3350; background: #211c2c; font-weight: 700; font-size: 12.5px; }
+      .top .coins { border: 0; background: #ffc83d; color: #2a1d00; }
+      .card { position: relative; height: min(86vh, 720px); aspect-ratio: 9 / 16; border-radius: 18px; overflow: hidden; background: #000; flex-shrink: 0; }
+      .video { position: absolute; inset: 0; background:
+          radial-gradient(120% 70% at 20% 15%, #ff9a4d 0%, transparent 55%),
+          radial-gradient(90% 60% at 85% 35%, #c14dff 0%, transparent 60%),
+          radial-gradient(120% 80% at 50% 100%, #2d6bff 0%, transparent 60%),
+          #241a3a; }
+      .video::after { content: ""; position: absolute; left: 50%; top: 44%; width: 74px; height: 74px; margin: -37px; border-radius: 50%; background: rgba(255,255,255,0.22); backdrop-filter: blur(4px); }
+      .video::before { content: ""; position: absolute; left: 50%; top: 44%; margin: -14px 0 0 -9px; border-style: solid; border-width: 14px 0 14px 24px; border-color: transparent transparent transparent #fff; z-index: 1; }
+      .badge { position: absolute; left: 14px; top: 14px; font-size: 11px; font-weight: 800; padding: 3px 8px; border-radius: 6px; background: rgba(0,0,0,0.55); }
+      .meta { position: absolute; left: 16px; right: 16px; bottom: 16px; text-shadow: 0 1px 6px rgba(0,0,0,0.6); }
+      .meta b { font-size: 15px; }
+      .meta p { margin: 6px 0 0; font-size: 13.5px; line-height: 1.35; }
+      .meta .music { margin-top: 8px; font-size: 12.5px; opacity: 0.9; }
+      .actions { display: flex; flex-direction: column; gap: 16px; align-items: center; align-self: flex-end; padding-bottom: 24px; }
+      .actions button { width: 50px; height: 50px; border-radius: 50%; border: 0; background: #2a2437; display: block; position: relative; }
+      .actions button::after { content: ""; position: absolute; inset: 15px; border-radius: 6px; background: #f2eefc; }
+      .actions button.like::after { background: #ff4d6d; border-radius: 50%; }
+      .actions .item { display: flex; flex-direction: column; align-items: center; gap: 5px; }
+      .actions strong { font-size: 12.5px; font-weight: 700; }
+      .next { position: absolute; right: 18px; bottom: 18px; width: 44px; height: 44px; border-radius: 50%; border: 0; background: #2a2437; }
+
+      .comments { border-left: 1px solid #2a2536; display: flex; flex-direction: column; min-width: 0; }
+      .comments header { padding: 16px 18px; font-weight: 800; font-size: 16px; border-bottom: 1px solid #2a2536; }
+      .tabs { display: flex; gap: 18px; padding: 10px 18px 0; font-weight: 700; font-size: 13px; color: #9d95b3; }
+      .tabs button { background: none; border: 0; padding: 0 0 9px; border-bottom: 2px solid transparent; }
+      .tabs button[aria-selected="true"] { color: #fff; border-color: #fff; }
+      .list { padding: 8px 18px; overflow: hidden; display: flex; flex-direction: column; gap: 14px; }
+      .c { display: flex; gap: 10px; font-size: 13px; line-height: 1.35; }
+      .c i { width: 32px; height: 32px; border-radius: 50%; flex-shrink: 0; display: block; }
+      .c b { display: block; font-size: 12px; color: #b9b2cc; }
+      .c small { color: #7d7693; font-size: 11px; }
+      .empty { margin: auto; text-align: center; color: #6f6885; font-size: 13px; padding: 24px; display: none; }
+    </style>
+  </head>
+  <body>
+    <div class="app" id="app">
+      <aside class="side DivSideNavContainer">
+        <div class="brand"><i></i>shortvideo</div>
+        <form class="search" action="/search">
+          <input type="search" data-e2e="search-user-input" placeholder="Search" />
+        </form>
+        <nav class="nav DivMainNavContainer">
+          <ul>
+            <li><a class="hot" data-e2e="nav-foryou" href="/foryou"><span class="ic"></span>For You<span class="dot DivRedDotContainer"></span></a></li>
+            <li><a data-e2e="nav-explore" href="/explore"><span class="ic"></span>Explore<span class="tag">NEW</span></a></li>
+            <li><a data-e2e="nav-following" href="/following"><span class="ic"></span>Following</a></li>
+            <li><a data-e2e="nav-friends" href="/friends"><span class="ic"></span>Friends<span class="dot DivRedDotContainer"></span></a></li>
+            <li><a class="hot" data-e2e="nav-live" href="/live"><span class="ic"></span>LIVE<span class="tag">12</span></a></li>
+            <li><a data-e2e="nav-shop" href="/shop"><span class="ic"></span>Shop<span class="tag">-70%</span></a></li>
+            <li><a data-e2e="nav-profile" href="/@you"><span class="ic"></span>Profile</a></li>
+          </ul>
+        </nav>
+        <div class="block">
+          <h4 data-e2e="following-accounts">Following accounts</h4>
+          <a class="acct" data-e2e="following-user-button" href="/@mira"><i style="background:#ff8a3d"></i><span>mira.codes<small>Mira</small></span></a>
+          <a class="acct" data-e2e="following-user-button" href="/@jo"><i style="background:#4dd0ff"></i><span>jo.bakes<small>Jo</small></span></a>
+          <a class="acct" data-e2e="following-user-button" href="/@ren"><i style="background:#c14dff"></i><span>ren.climbs<small>Ren</small></span></a>
+        </div>
+        <div class="block" data-e2e="suggest-accounts">
+          <h4>Suggested accounts</h4>
+          <a class="acct" href="/@viral1"><i style="background:#ff4d8d"></i><span>viral.daily<small>9.8M followers</small></span></a>
+          <a class="acct" href="/@viral2"><i style="background:#ffc83d"></i><span>prank.zone<small>4.1M followers</small></span></a>
+        </div>
+        <div class="ad">
+          <span>Sponsored</span>
+          <a href="/shop/deal">Mega sale: 70% off, today only</a>
+        </div>
+        <button class="promo-btn" type="button">Get app</button>
+        <div class="foot" data-e2e="footer-container">Company · Program · Terms &amp; Policies<br />© short video mock</div>
+      </aside>
+
+      <main class="main">
+        <div class="top">
+          <button class="coins" type="button" data-e2e="get-coins-button">Get coins</button>
+          <button type="button">Inbox</button>
+        </div>
+        <div data-e2e="feed-container" style="display: contents">
+          <article class="card" data-e2e="recommend-list-item-container">
+            <div data-e2e="feed-video" style="position: absolute; inset: 0">
+              <div class="video"></div>
+              <span class="badge">LIVE soon</span>
+              <div class="meta">
+                <b>@viral.daily</b>
+                <p data-e2e="video-desc">You won't BELIEVE what happens next… wait for it #fyp #viral #foryou</p>
+                <div class="music" data-e2e="video-music">♪ trending sound · 2.4M videos</div>
+              </div>
+            </div>
+          </article>
+          <section class="actions SectionActionBarContainer">
+            <div class="item"><button class="like" type="button" aria-label="Like"></button><strong data-e2e="like-count">1.2M</strong></div>
+            <div class="item"><button type="button" aria-label="Comment"></button><strong data-e2e="comment-count">48.3K</strong></div>
+            <div class="item"><button type="button" aria-label="Share"></button><strong data-e2e="share-count">310K</strong></div>
+          </section>
+        </div>
+        <button class="next" type="button" data-e2e="feed-navigation-next" aria-label="Next video"></button>
+      </main>
+
+      <aside class="comments">
+        <div class="SectionCommentSidebarContainer" style="display: flex; flex-direction: column; min-height: 0">
+          <header>Comments (48.3K)</header>
+          <div class="tabs">
+            <button type="button" role="tab" aria-selected="true">Comments</button>
+          </div>
+          <div class="list" data-e2e="comment-list">
+            <div class="c"><i style="background:#ff8a3d"></i><span><b>user8841</b>first!!! who else is here at 3am<br /><small>2h · 12.4K likes</small></span></div>
+            <div class="c"><i style="background:#4dd0ff"></i><span><b>meme.lord</b>the comments are better than the video<br /><small>2h · 9.1K likes</small></span></div>
+            <div class="c"><i style="background:#c14dff"></i><span><b>angry_take</b>this is wrong and here is my 14-part reply<br /><small>1h · 4.7K likes</small></span></div>
+            <div class="c"><i style="background:#ffc83d"></i><span><b>scroll.4ever</b>ok one more video and then I sleep<br /><small>58m · 3.3K likes</small></span></div>
+            <div class="c"><i style="background:#ff4d8d"></i><span><b>bot_3391</b>check my profile for free coins<br /><small>41m · 12 likes</small></span></div>
+            <div class="c"><i style="background:#6ee7a8"></i><span><b>deep.thoughts</b>why am I still watching this<br /><small>30m · 2.2K likes</small></span></div>
+          </div>
+        </div>
+        <div class="empty" id="calm">Nothing here to pull you in.</div>
+      </aside>
+    </div>
+  </body>
+</html>

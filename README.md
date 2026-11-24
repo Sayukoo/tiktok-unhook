@@ -1,76 +1,75 @@
-# 🛡️ TikTok Unhook - Distraction-Free Focus Mode
+# Offhook
 
-[![Firefox Add-on](https://img.shields.io/amo/v/tiktok-unhook-distraction-free?label=Firefox%20Add-on&logo=firefox-browser&color=orange)](https://addons.mozilla.org/en-US/firefox/addon/tiktok-unhook-distraction-free/)
-[![Users](https://img.shields.io/amo/users/tiktok-unhook-distraction-free?color=blue)](https://addons.mozilla.org/en-US/firefox/addon/tiktok-unhook-distraction-free/)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](#)
+**Distraction-free focus mode for TikTok** (desktop, tiktok.com). Offhook hides the For You feed, comments and counters, and adds limits that are deliberately hard to talk your way out of. It is the extension for people trying to unhook from TikTok.
 
-> 🦊 **Install for Firefox (Desktop & Android):**  
-> 👉 **[Download from Mozilla Add-ons (AMO)](https://addons.mozilla.org/en-US/firefox/addon/tiktok-unhook-distraction-free/)**
+Free and open source. No account, no analytics, no server. English and Polish.
 
-> 📄 **[Privacy Policy](PRIVACY_POLICY.md)**
+[Privacy policy](PRIVACY_POLICY.md)
 
-A modern browser extension for **Firefox** & **Chrome** built with **WXT (React + TypeScript + Tailwind CSS)**. It removes addictive algorithmic feeds, vanity metrics, comments, and distractions from TikTok, allowing you to regain control over your attention and browse intentionally.
+![Offhook](promo/en/promo-marquee-1400x560.png)
 
-Available in **English (Default)** and **Polish**.
+## What it does
 
----
+### Limits and lock
 
-## ✨ Features
+| Feature | What happens |
+| --- | --- |
+| **Lock my settings** | Switching a protection off, or loosening a limit, first requires typing a sentence by hand: one letter per second, a typo rewinds eight letters, then a three-second hold. Settings then stay open for 3 minutes. Each attempt the same day adds another sentence (up to three). |
+| **Turning Offhook off** | Always goes through the same typing ritual, even when "Lock my settings" is off. |
+| **Pause before entering** | A countdown before the site opens, once per tab. |
+| **Daily limit** | After the set number of minutes the site is covered until midnight. Time is counted across all tabs. |
+| **Quiet hours** | The site is covered between two hours every day (the window may cross midnight). |
+| **"5 more minutes" pass** | Lifts a limit or quiet hours for 5 minutes after typing a random code. The code grows with every pass that day: 30, 45, 60, 75, 90 characters. |
+| **Search lock** | Search opens for 5 minutes after typing a 30-character code. |
+| **Grayscale** | Shows the whole site in black and white. |
 
-* 🚫 **Hide "For You"** – Removes only the For You button from the sidebar; the feed itself stays reachable.
-* 👤 **Direct Profile Landing** – Opening tiktok.com takes you straight to your profile instead of the For You feed.
-* 🔒 **Search Lock** – Requires typing 30 random characters before search opens, for 5 minutes at a time.
-* 👥 **Hide Suggested Accounts** – Keeps only your followed creators in the sidebar.
-* 💬 **Hide Comments Section** – Blocks comment threads and comment loading.
-* ❤️ **Hide Likes & Vanity Metrics** – Removes heart counts, shares, and metric anxiety.
-* 🛍️ **Hide Shop & Ads** – Eliminates TikTok Shop badges and promoted videos.
-* 🪙 **Hide "Get Coins" & "Get App"** – Removes coin top-up prompts and mobile app download nags.
-* 🧭 **Hide "Explore" Tab** – Hides the Explore button and trending page.
-* 📝 **Hide Descriptions & Sounds** – Reveals descriptions only when hovering over a video.
-* 👥 **Collapse "Following accounts" List** – The sidebar shows only a "View all" button; the list of followed creators stays hidden until you click it.
-* 🚫 **Hide "Friends" Tab** – Removes the Friends feed and its sidebar button.
-* 🔥 **Viral Only Filter** – Automatically skips non-viral videos in your Following feed.
-* ⚡ **Master Power Toggle (ON/OFF)** – Quickly toggle all protections on or off with a single click.
-* 🌐 **Bilingual (EN / PL)** – Full English and Polish localization with instant toggle.
-* 🌓 **Dark & Light Mode** – Beautiful UI matching your preference.
+A fresh install leaves settings open for 10 minutes so you can set things up.
 
----
+### Feed clean-up
 
-## 🚀 Development & Build
+* Hide the "For You" and "Explore" entries, the "Friends" feed, LIVE, the shop and sponsored blocks
+* Open your profile instead of the home feed
+* Hide comments, like/comment/share counters, or the action buttons altogether
+* Hide suggested accounts, collapse the list of followed accounts, hide follower counts
+* Hide coin and "get the app" prompts, the sidebar footer and red notification dots
+* Hide descriptions until you hover over a video
+* "Viral only": skip videos below your own like and comment thresholds
+* Keep playing in background when you switch tabs
+* Dark and light popup
 
-### Google Chrome (Manifest V3)
-* **Dev Mode (hot-reload):**
-  ```bash
-  npm run dev
-  ```
-  *(or double-click `URUCHOM_DEV_CHROME.bat`)*
-* **Build (unpacked extension):**
-  ```bash
-  npm run build
-  ```
-  Output folder: `.output/chrome-mv3` (load into `chrome://extensions`).
-* **Package ZIP for Chrome Web Store:**
-  ```bash
-  npm run zip
-  ```
-  *(or double-click `URUCHOM_WTYCZKE_CHROME.bat`)*
-  Generates ready-to-upload archive in `.output/tiktokunhook-*-chrome.zip`.
+### What it cannot do
 
----
+Offhook is a browser extension, so the browser itself can still remove or disable it from the extensions page. The lock makes switching off slow and deliberate; it is not parental control.
 
-### Mozilla Firefox (Manifest V2)
-* **Dev Mode:**
-  ```bash
-  npm run dev:firefox
-  ```
-  *(or double-click `URUCHOM_DEV_FIREFOX.bat`)*
-* **Build:**
-  ```bash
-  npm run build:firefox
-  ```
-  *(or double-click `URUCHOM_WTYCZKE_FIREFOX.bat`)*
-* **Package ZIP for addons.mozilla.org (AMO):**
-  ```bash
-  npm run zip:firefox
-  ```
-  Output archive in `.output/`.
+## Compatibility
+
+Runs only on `tiktok.com` (desktop web). It does nothing on any other site.
+
+TikTok is a trademark of its owner. Offhook is an independent project and is not affiliated with, endorsed by, or sponsored by TikTok.
+
+## Install
+
+* **Firefox:** [Mozilla Add-ons](https://addons.mozilla.org/en-US/firefox/addon/tiktok-unhook-distraction-free/)
+* **Chrome / Edge, from source:** `npm install`, `npm run build`, then load `.output/chrome-mv3` on `chrome://extensions` with Developer mode on.
+
+## Development
+
+Built with [WXT](https://wxt.dev), TypeScript and Tailwind CSS. Requires Node 22.18 or newer.
+
+| Command | Purpose |
+| --- | --- |
+| `npm run dev` / `npm run dev:firefox` | Dev mode with hot reload |
+| `npm run build` / `npm run build:firefox` | Unpacked build in `.output/` |
+| `npm run zip` / `npm run zip:firefox` | Store-ready ZIP in `.output/` |
+| `npm run compile` | Type check |
+| `npm test` | Unit tests for the lock, limits and settings logic |
+| `npm run e2e` | Runs the built bundles in headless Edge against a local mock site (run `npm run build` first) |
+| `npm run icons` | Regenerates PNG icons from `public/icon.svg` |
+| `npm run promo` | Regenerates store screenshots and tiles in `promo/en` and `promo/pl` |
+| `npm run promo:video` | Regenerates the 1920x1080 promo video |
+
+On Windows the `URUCHOM_*.bat` files wrap the dev and zip commands.
+
+`npm run e2e`, `npm run promo` and `npm run promo:video` need Microsoft Edge installed. They load the content script and popup into a local mock page with a stubbed extension API, so they check Offhook's own behavior, not the live site.
+
+The name, store texts and colors live in `utils/brand.ts`; the localized store name and summary are in `public/_locales`. Store listing texts are in [`promo/STORE_LISTING.md`](promo/STORE_LISTING.md).

@@ -1,5 +1,5 @@
 @echo off
-title Blokada TikToka - Chrome Runner (Wersja Rozszerzenia)
+title Offhook - Chrome Runner (Wersja Rozszerzenia)
 color 0b
 echo =======================================================
 echo          BUDOWANIE WTYCZKI DLA GOOGLE CHROME
@@ -17,6 +17,6 @@ echo   3. Kliknij przycisk "Zaladuj rozpakowane" (Load unpacked).
 echo   4. Wybierz folder: .output\chrome-mv3
 echo.
 echo Wersja do Google Web Store (ZIP) znajduje sie w:
-echo   .output\tiktokunhook-1.3.5-chrome.zip
+echo   .output\offhook-2.0.0-chrome.zip
 echo =======================================================
 pause

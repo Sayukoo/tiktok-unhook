@@ -1,8 +1,8 @@
 @echo off
-title Blokada TikToka - Firefox Runner
+title Offhook - Firefox Runner
 color 0b
 echo =======================================================
-echo          URUCHAMIANIE WTYCZKI BLOKADA TIKTOKA
+echo          URUCHAMIANIE WTYCZKI OFFHOOK
 echo =======================================================
 echo.
 echo Budowanie czystej wersji produkcyjnej wtyczki...

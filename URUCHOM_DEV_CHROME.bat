@@ -1,8 +1,8 @@
 @echo off
-title Blokada TikToka - Chrome Runner
+title Offhook - Chrome Runner
 color 0a
 echo =======================================================
-echo    URUCHAMIANIE WTYCZKI BLOKADA TIKTOKA W CHROME
+echo    URUCHAMIANIE WTYCZKI OFFHOOK W CHROME
 echo =======================================================
 echo.
 echo Uruchamianie Chrome z automatycznie podpieta wtyczka...

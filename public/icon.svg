@@ -1,23 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
-  <!-- Minimalistyczne 2D ciemne tło (Squircle) -->
-  <rect width="128" height="128" rx="30" fill="#121212" />
-  
-  <!-- 2D Płaska Nuta TikToka z rozszczepieniem barw Cyan + Magenta -->
-  <!-- Magenta Layer (Prawa/Dół) -->
-  <path d="M72 34 V74 A16 16 0 1 1 56 58 A16 16 0 0 1 62 59.2 V47 A30 30 0 0 0 86 54 V40 A18 18 0 0 1 72 34 Z" 
-        fill="#FE2C55" 
-        transform="translate(2.5, 2.5)"/>
+  <!-- Tło: ciemny zaokrąglony kwadrat -->
+  <rect width="128" height="128" rx="30" fill="#0E0F13" />
 
-  <!-- Cyan Layer (Lewa/Góra) -->
-  <path d="M72 34 V74 A16 16 0 1 1 56 58 A16 16 0 0 1 62 59.2 V47 A30 30 0 0 0 86 54 V40 A18 18 0 0 1 72 34 Z" 
-        fill="#25F4EE" 
-        transform="translate(-2.5, -2.5)"/>
-
-  <!-- Biała nuta 2D na wierzchu -->
-  <path d="M72 34 V74 A16 16 0 1 1 56 58 A16 16 0 0 1 62 59.2 V47 A30 30 0 0 0 86 54 V40 A18 18 0 0 1 72 34 Z" 
-        fill="#FFFFFF"/>
-
-  <!-- Minimalistyczny 2D ukośny pasek blokady (Unhook Slash) z miękkimi zaokrągleniami -->
-  <line x1="30" y1="98" x2="98" y2="30" stroke="#121212" stroke-width="12" stroke-linecap="round"/>
-  <line x1="30" y1="98" x2="98" y2="30" stroke="#FE2C55" stroke-width="6" stroke-linecap="round"/>
+  <!-- Znak: haczyk z oczkiem. Te same kształty rysuje getAppLogo() w popupie. -->
+  <g fill="none" stroke="#D4FF3A" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="76" cy="30" r="9" stroke-width="9" />
+    <path d="M76 41 V78 a24 24 0 0 1 -48 0 V64" stroke-width="13" />
+    <path d="M28 64 l13 13" stroke-width="11" />
+  </g>
 </svg>

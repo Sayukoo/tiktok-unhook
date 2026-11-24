@@ -4,7 +4,8 @@ import path from 'path';
 
 const svgPath = path.resolve('public/icon.svg');
 const publicDir = path.resolve('public');
-const sizes = [16, 32, 48, 128, 256];
+// 64 tez: plik lezy w public/ i trafia do paczki, wiec musi byc aktualny.
+const sizes = [16, 32, 48, 64, 128, 256];
 
 async function generate() {
   const svgBuffer = fs.readFileSync(svgPath);
